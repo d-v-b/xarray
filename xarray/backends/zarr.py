@@ -114,6 +114,57 @@ def _zarr_v3() -> bool:
 DIMENSION_KEY = "_ARRAY_DIMENSIONS"
 ZarrFormat = Literal[2, 3]
 
+# --- Zarr encoding keys -----------------------------------------------------
+# The variable ``.encoding`` dict is xarray's channel for storage-level metadata.
+# For the Zarr backend the recognized keys fall into three groups. Keeping them
+# here as the single source of truth (rather than inline in
+# ``extract_zarr_variable_encoding``) makes it possible to document, validate,
+# and eventually translate between Zarr formats consistently.
+
+# Encoding keys understood by the Zarr backend and forwarded as keyword
+# arguments to zarr's array-creation routine. Valid for both Zarr formats.
+ZARR_ENCODING_KEYS: frozenset[str] = frozenset(
+    {
+        "chunks",
+        "shards",
+        "compressor",  # TODO: delete when min zarr >=3
+        "compressors",
+        "filters",
+        "serializer",
+        "cache_metadata",
+        "write_empty_chunks",
+        "chunk_key_encoding",
+    }
+)
+
+# Encoding keys that are only valid for Zarr format 3. In format 2 the array
+# fill value is carried by the ``_FillValue`` attribute instead.
+ZARR_FORMAT_V3_ONLY_ENCODING_KEYS: frozenset[str] = frozenset({"fill_value"})
+
+# Informational keys that xarray populates in ``.encoding`` on read (or that
+# originate from other backends) but that must never be forwarded to zarr on
+# write. These are dropped silently.
+ZARR_READ_ONLY_ENCODING_KEYS: frozenset[str] = frozenset(
+    {"source", "original_shape", "preferred_chunks"}
+)
+
+
+def valid_zarr_encoding_keys(zarr_format: ZarrFormat) -> frozenset[str]:
+    """Return the set of ``.encoding`` keys the Zarr backend accepts on write.
+
+    Parameters
+    ----------
+    zarr_format : {2, 3}
+        The Zarr format being written to.
+
+    Returns
+    -------
+    frozenset of str
+    """
+    if zarr_format == 3:
+        return ZARR_ENCODING_KEYS | ZARR_FORMAT_V3_ONLY_ENCODING_KEYS
+    return ZARR_ENCODING_KEYS
+
 
 class FillValueCoder:
     """Handle custom logic to safely encode and decode fill values in Zarr.
@@ -492,22 +543,9 @@ def extract_zarr_variable_encoding(
 
     encoding = variable.encoding.copy()
 
-    safe_to_drop = {"source", "original_shape", "preferred_chunks"}
-    valid_encodings = {
-        "chunks",
-        "shards",
-        "compressor",  # TODO: delete when min zarr >=3
-        "compressors",
-        "filters",
-        "serializer",
-        "cache_metadata",
-        "write_empty_chunks",
-        "chunk_key_encoding",
-    }
-    if zarr_format == 3:
-        valid_encodings.add("fill_value")
+    valid_encodings = valid_zarr_encoding_keys(zarr_format)
 
-    for k in safe_to_drop:
+    for k in ZARR_READ_ONLY_ENCODING_KEYS:
         if k in encoding:
             del encoding[k]
 

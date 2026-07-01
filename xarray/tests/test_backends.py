@@ -7204,6 +7204,20 @@ def test_extract_zarr_variable_encoding() -> None:
 
 
 @requires_zarr
+def test_valid_zarr_encoding_keys() -> None:
+    # fill_value is the only format-specific encoding key: valid for v3 only,
+    # since in format 2 the fill value is carried by the _FillValue attribute.
+    v2 = backends.zarr.valid_zarr_encoding_keys(2)
+    v3 = backends.zarr.valid_zarr_encoding_keys(3)
+    assert v3 - v2 == {"fill_value"}
+    assert "chunks" in v2 and "chunks" in v3
+
+    # read-only/informational keys are never part of the writable key set
+    assert not (backends.zarr.ZARR_READ_ONLY_ENCODING_KEYS & v3)
+    assert "preferred_chunks" in backends.zarr.ZARR_READ_ONLY_ENCODING_KEYS
+
+
+@requires_zarr
 @requires_fsspec
 @pytest.mark.filterwarnings("ignore:deallocating CachingFileManager")
 def test_open_fsspec() -> None:
