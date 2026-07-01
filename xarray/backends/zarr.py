@@ -520,11 +520,11 @@ def _get_zarr_dims_and_attrs(zarr_obj, dimension_key, try_nczarr):
 
 
 def _validate_zarr_variable_encoding(
-    encoding: Mapping[str, Any],
+    encoding: Mapping[str, object],
     *,
     raise_on_invalid: bool,
     zarr_format: ZarrFormat,
-) -> dict[str, Any]:
+) -> dict[str, object]:
     """Filter an encoding mapping down to the keys the Zarr backend accepts.
 
     Read-only/informational keys (``ZARR_READ_ONLY_ENCODING_KEYS``) are always
