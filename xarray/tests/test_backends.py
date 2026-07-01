@@ -7204,6 +7204,32 @@ def test_extract_zarr_variable_encoding() -> None:
 
 
 @requires_zarr
+def test_validate_zarr_variable_encoding() -> None:
+    validate = backends.zarr._validate_zarr_variable_encoding
+
+    # read-only keys are always dropped, input is not mutated
+    src = {"chunks": (1,), "preferred_chunks": {"x": 1}, "source": "foo.zarr"}
+    out = validate(src, raise_on_invalid=False, zarr_format=3)
+    assert out == {"chunks": (1,)}
+    assert "preferred_chunks" in src  # input untouched
+
+    # unknown keys dropped silently when not raising
+    out = validate({"foo": 1, "chunks": (1,)}, raise_on_invalid=False, zarr_format=3)
+    assert out == {"chunks": (1,)}
+
+    # unknown keys raise when requested
+    with pytest.raises(ValueError, match=r"unexpected encoding parameters"):
+        validate({"foo": 1}, raise_on_invalid=True, zarr_format=3)
+
+    # fill_value is only valid for v3; v2 raises with a helpful hint
+    assert validate({"fill_value": 0}, raise_on_invalid=True, zarr_format=3) == {
+        "fill_value": 0
+    }
+    with pytest.raises(ValueError, match=r"Use `_FillValue`"):
+        validate({"fill_value": 0}, raise_on_invalid=True, zarr_format=2)
+
+
+@requires_zarr
 def test_valid_zarr_encoding_keys() -> None:
     # fill_value is the only format-specific encoding key: valid for v3 only,
     # since in format 2 the fill value is carried by the _FillValue attribute.
