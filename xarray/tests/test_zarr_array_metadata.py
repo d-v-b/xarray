@@ -210,3 +210,26 @@ def test_convert_metadata_v2_to_v3_raises_for_unmapped_filter(tmp_path):
 
     with pytest.raises(NotImplementedError, match="delta"):
         convert_zarr_metadata(v2, 3)
+
+
+@requires_zarr
+def test_persist_array_roundtrips(tmp_path):
+    import zarr
+    from zarr.storage import LocalStore, StorePath
+
+    from xarray.backends.zarr_array_metadata import (
+        persist_array,
+        read_metadata_fragment,
+    )
+
+    g = zarr.open_group(tmp_path / "src.zarr", mode="w", zarr_format=3)
+    src = g.create_array("a", shape=(10,), chunks=(5,), dtype="f8")
+    frag = read_metadata_fragment(src)
+
+    store = LocalStore(str(tmp_path / "dst.zarr"))
+    persist_array(StorePath(store, "a"), frag)
+
+    reopened = zarr.open_array(str(tmp_path / "dst.zarr"), path="a", mode="r")
+    assert reopened.shape == (10,)
+    assert reopened.chunks == (5,)
+    assert reopened.metadata.to_dict()["codecs"] == frag["codecs"]

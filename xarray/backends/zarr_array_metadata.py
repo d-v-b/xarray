@@ -292,3 +292,26 @@ def _convert_v3_to_v2(fragment: Mapping[str, object]) -> dict[str, object]:
         "dimension_separator": separator,
         "attributes": dict(fragment.get("attributes") or {}),  # type: ignore[call-overload]
     }
+
+
+def persist_array(store_path, fragment: dict[str, object]) -> None:
+    """Persist a new zarr array from a canonical metadata dict.
+
+    ``ArrayV{2,3}Metadata.from_dict`` builds an in-memory object that does NOT
+    write to the store, so we serialize its buffers explicitly.
+    """
+    from zarr.core.buffer import default_buffer_prototype
+    from zarr.core.metadata import ArrayV2Metadata, ArrayV3Metadata
+    from zarr.core.sync import sync
+
+    if fragment.get("zarr_format") == 2:
+        meta = ArrayV2Metadata.from_dict(fragment)
+    else:
+        meta = ArrayV3Metadata.from_dict(fragment)
+
+    async def _write() -> None:
+        buffers = meta.to_buffer_dict(default_buffer_prototype())
+        for key, buffer in buffers.items():
+            await (store_path / key).set(buffer)
+
+    sync(_write())
