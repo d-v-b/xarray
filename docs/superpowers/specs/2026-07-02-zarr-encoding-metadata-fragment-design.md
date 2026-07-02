@@ -57,9 +57,14 @@ during a deprecation period.
    the derived flat aliases so existing code keeps working. Setting a flat
    storage-layout key emits a `DeprecationWarning`; hard removal is a separate,
    later change (out of scope).
-5. **Create via `from_dict`.** Read uses `zarr_array.metadata.to_dict()`; write
-   uses zarr-python's `Array.from_dict(store_path, metadata_dict)` (and
-   `ArrayV2Metadata`/`ArrayV3Metadata.from_dict`/`to_dict`). No kwarg translation.
+5. **Read via `to_dict`; create by persisting metadata buffers.** Read uses
+   `zarr_array.metadata.to_dict()`. Write builds
+   `ArrayV{2,3}Metadata.from_dict(canonical_dict)` and persists its
+   `to_buffer_dict(prototype)` output to the array's store path. No kwarg
+   translation. VERIFIED (zarr-python 3.2.1): `from_dict` alone constructs an
+   in-memory handle but does NOT persist — a persist step is required. Migrate
+   this single create call to a persisting upstream create-from-metadata API when
+   zarr-python offers one (the "C later" path; the seam is the only call site).
 6. **`zarr-metadata` typing only (near-term).** Import the v2/v3 metadata
    `TypedDict`s from the `zarr-metadata` package under `if TYPE_CHECKING:` to
    annotate the fragment (`ArrayMetadataV2 | ArrayMetadataV3`). No runtime
@@ -111,7 +116,9 @@ _open_ rather than create) are unchanged.
    (`_determine_zarr_chunks`, alignment checks); write the resolved chunk grid
    into the dict.
 4. **Convert format if needed** (see below).
-5. **Create** the array with `Array.from_dict(store_path, metadata_dict)`.
+5. **Persist** the array: build `ArrayV{2,3}Metadata.from_dict(canonical_dict)`
+   and write its `to_buffer_dict(prototype)` output to the array's store path.
+   (`from_dict` constructs but does not persist; the seam owns this persist step.)
 
 ### Format conversion
 
@@ -159,8 +166,9 @@ touches.
 
 ## Open implementation questions (resolve in the plan)
 
-1. Confirm `Array.from_dict` **persists** new-array metadata to the store (vs.
-   needing an explicit create/save step).
+1. RESOLVED: `from_dict` does not persist; write path persists
+   `ArrayV{2,3}Metadata.to_buffer_dict(prototype)` to the store (mechanism "A").
+   Migrate to an upstream persisting create-from-metadata API when available.
 2. How runtime-only store behaviors absent from the metadata document
    (`write_empty_chunks`/`config`, `overwrite`) are applied alongside `from_dict`.
 3. Exact derivation of legacy flat aliases on read — match today's output vs.
