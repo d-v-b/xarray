@@ -233,3 +233,25 @@ def test_persist_array_roundtrips(tmp_path):
     assert reopened.shape == (10,)
     assert reopened.chunks == (5,)
     assert reopened.metadata.to_dict()["codecs"] == frag["codecs"]
+
+
+@requires_zarr
+def test_build_canonical_metadata_v3(tmp_path):
+    import zarr
+
+    from xarray.backends.zarr_array_metadata import (
+        build_canonical_metadata,
+        read_metadata_fragment,
+    )
+
+    g = zarr.open_group(tmp_path / "g.zarr", mode="w", zarr_format=3)
+    a = g.create_array("a", shape=(10,), chunks=(5,), dtype="f8")
+    encoding = {"zarr_array_metadata": read_metadata_fragment(a)}
+
+    out = build_canonical_metadata(
+        encoding, shape=(8,), dims=("x",), target_format=3, resolved_chunks=(4,)
+    )
+    assert out["zarr_format"] == 3
+    assert out["shape"] == (8,)
+    assert out["dimension_names"] == ("x",)
+    assert tuple(out["chunk_grid"]["configuration"]["chunk_shape"]) == (4,)

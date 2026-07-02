@@ -294,6 +294,36 @@ def _convert_v3_to_v2(fragment: Mapping[str, object]) -> dict[str, object]:
     }
 
 
+def _set_chunk_shape(fragment: dict[str, object], chunks: tuple[int, ...]) -> None:
+    if fragment.get("zarr_format") == 3:
+        fragment["chunk_grid"] = {
+            "name": "regular",
+            "configuration": {"chunk_shape": tuple(chunks)},
+        }
+    else:
+        fragment["chunks"] = tuple(chunks)
+
+
+def build_canonical_metadata(
+    encoding: Mapping[str, object],
+    *,
+    shape: tuple[int, ...],
+    dims: tuple[str, ...],
+    target_format: int,
+    resolved_chunks: tuple[int, ...],
+) -> dict[str, object]:
+    """Produce the canonical, target-format metadata dict for a write."""
+    fragment = encoding["zarr_array_metadata"]
+    if not isinstance(fragment, dict):
+        raise TypeError("encoding['zarr_array_metadata'] must be a dict")
+
+    fragment = merge_flat_aliases(fragment, encoding)
+    fragment = convert_zarr_metadata(fragment, target_format)
+    fragment = apply_variable_fields(fragment, shape=shape, dims=dims)
+    _set_chunk_shape(fragment, resolved_chunks)
+    return fragment
+
+
 def persist_array(store_path, fragment: dict[str, object]) -> None:
     """Persist a new zarr array from a canonical metadata dict.
 
