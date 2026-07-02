@@ -24,6 +24,7 @@ from xarray.backends.common import (
     ensure_dtype_not_object,
 )
 from xarray.backends.store import StoreBackendEntrypoint
+from xarray.backends.zarr_array_metadata import read_metadata_fragment
 from xarray.core import indexing
 from xarray.core.treenode import NodePath
 from xarray.core.types import ZarrWriteModes
@@ -979,6 +980,7 @@ class ZarrStore(AbstractWritableDataStore):
             )
             if self.zarr_group.metadata.zarr_format == 3:
                 encoding.update({"serializer": zarr_array.serializer})
+            encoding["zarr_array_metadata"] = read_metadata_fragment(zarr_array)
         else:
             encoding.update(
                 {

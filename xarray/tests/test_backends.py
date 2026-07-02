@@ -3880,6 +3880,21 @@ class ZarrBase(CFEncodedBase):
             with self.roundtrip(opened, open_kwargs=open_kwargs) as actual:
                 assert actual.foo.encoding["fill_value"] == -99
 
+    def test_open_populates_zarr_array_metadata(self, tmp_path) -> None:
+        from xarray.backends.zarr import _zarr_v3
+
+        if not _zarr_v3():
+            pytest.skip("requires zarr-python 3")
+
+        ds = xr.Dataset({"a": ("x", [1.0, 2.0, 3.0, 4.0])}).chunk({"x": 2})
+        ds.to_zarr(tmp_path / "s.zarr", zarr_format=3, mode="w")
+
+        opened = xr.open_zarr(tmp_path / "s.zarr")
+        frag = opened["a"].encoding["zarr_array_metadata"]
+        assert frag["zarr_format"] == 3
+        # legacy flat keys still present
+        assert "chunks" in opened["a"].encoding
+
 
 @requires_zarr
 class TestInstrumentedZarrStore:
