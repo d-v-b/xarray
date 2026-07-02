@@ -8,6 +8,7 @@ backend call sites.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -39,3 +40,42 @@ def derive_flat_aliases(
     if zarr_array.metadata.zarr_format == 3:
         aliases["serializer"] = zarr_array.serializer
     return aliases
+
+
+def _fragment_chunk_shape(fragment: Mapping[str, object]) -> tuple[int, ...] | None:
+    if fragment.get("zarr_format") == 3:
+        grid = fragment.get("chunk_grid")
+        if isinstance(grid, Mapping):
+            config = grid.get("configuration")
+            if isinstance(config, Mapping):
+                shape = config.get("chunk_shape")
+                return tuple(shape) if shape is not None else None
+        return None
+    chunks = fragment.get("chunks")
+    return tuple(chunks) if chunks is not None else None
+
+
+def merge_flat_aliases(
+    fragment: dict[str, object], encoding: Mapping[str, object]
+) -> dict[str, object]:
+    """Fold legacy flat keys into ``fragment``; raise on disagreement."""
+    result = dict(fragment)
+
+    if "chunks" in encoding and encoding["chunks"] is not None:
+        flat = tuple(encoding["chunks"])  # type: ignore[arg-type]
+        frag_chunks = _fragment_chunk_shape(result)
+        if frag_chunks is not None and frag_chunks != flat:
+            raise ValueError(
+                "conflicting 'chunks': encoding has "
+                f"{flat!r} but zarr_array_metadata has {frag_chunks!r}"
+            )
+
+    if "fill_value" in encoding and "fill_value" in result:
+        if encoding["fill_value"] != result["fill_value"]:
+            raise ValueError(
+                "conflicting 'fill_value': encoding has "
+                f"{encoding['fill_value']!r} but zarr_array_metadata has "
+                f"{result['fill_value']!r}"
+            )
+
+    return result

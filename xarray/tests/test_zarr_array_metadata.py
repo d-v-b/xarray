@@ -1,3 +1,5 @@
+import pytest
+
 from xarray.tests import requires_zarr
 
 
@@ -32,3 +34,23 @@ def test_derive_flat_aliases_matches_live_attrs(tmp_path):
     assert aliases["filters"] == a.filters
     assert aliases["shards"] == a.shards
     assert aliases["serializer"] == a.serializer
+
+
+@requires_zarr
+def test_merge_flat_aliases_conflict_raises():
+    from xarray.backends.zarr_array_metadata import merge_flat_aliases
+
+    fragment = {
+        "zarr_format": 3,
+        "chunk_grid": {
+            "name": "regular",
+            "configuration": {"chunk_shape": (5,)},
+        },
+    }
+    # agreeing chunks: no error, returns fragment unchanged for that field
+    out = merge_flat_aliases(fragment, {"chunks": (5,)})
+    assert out["chunk_grid"]["configuration"]["chunk_shape"] == (5,)
+
+    # disagreeing chunks: raise, naming the field
+    with pytest.raises(ValueError, match=r"chunks"):
+        merge_flat_aliases(fragment, {"chunks": (10,)})
