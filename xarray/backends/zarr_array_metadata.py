@@ -24,8 +24,10 @@ def derive_flat_aliases(
 ) -> dict[str, object]:
     """Build the legacy flat encoding keys from a live zarr (v3) array.
 
-    Reproduces exactly what ``ZarrStore.open_store_variable`` emitted before the
-    metadata fragment existed, for backward compatibility.
+    Reproduces exactly what ``ZarrStore.open_store_variable`` emits on the
+    zarr-python-3 runtime, for backward compatibility.
+    This function is only invoked under ``_zarr_v3()``; the zarr-python-2
+    legacy path is handled in ``open_store_variable`` itself.
     """
     aliases: dict[str, object] = {
         "chunks": zarr_array.chunks,
