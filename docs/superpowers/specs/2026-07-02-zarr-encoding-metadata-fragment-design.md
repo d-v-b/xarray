@@ -127,6 +127,21 @@ The fragment is annotated as `ArrayMetadataV2 | ArrayMetadataV3` using
 `zarr-metadata` `TypedDict`s imported under `TYPE_CHECKING`. Runtime values are
 plain dicts from zarr-python's `to_dict`/`from_dict`.
 
+### Future direction: dataclass-based representation
+
+The seam is designed so its backing can later become a dataclass-based metadata
+representation from `zarr-metadata` (which the user maintains) instead of plain
+dicts. Dataclasses fit the four operations the seam performs: `to_dict`/`from_dict`
+round-trip, field override via `dataclasses.replace` (Variable-wins),
+`isinstance`-dispatched format conversion, and clean equality/copy/pickle for the
+append and dask paths. That would flip decision #6 (making `zarr-metadata` an
+optional _runtime_ dependency in the zarr extra) and pin a minimum version.
+
+**Sequencing (decided):** build the seam against plain dicts now so xarray work is
+not gated on a `zarr-metadata` release; swap the seam's backing to dataclasses in
+a follow-up once those ship upstream. The seam is the single place that change
+touches.
+
 ## Back-compat & deprecation
 
 - Read continues to emit the flat keys (derived from the fragment).
