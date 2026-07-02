@@ -952,3 +952,21 @@ Co-authored-by: Claude <noreply@anthropic.com>"
 
 - The seam (`zarr_array_metadata.py`) is the single place to later (a) swap the dict backing for a `zarr-metadata` dataclass and (b) replace `persist_array`'s buffer-writing with an upstream persisting create-from-metadata API. Neither changes `zarr.py` call sites.
 - Codec conversion (Task 6) is the only task with an unresolved external API detail; its Step 1 spike must run before Step 3.
+
+### Candidate upstream (zarr-python / zarr-metadata) improvements
+
+The user maintains these packages, so improving them is preferred over
+xarray-side workarounds where they belong upstream. Build the seam against the
+current APIs now (unblocked); migrate to these when they land — each touches only
+the seam, not `zarr.py`:
+
+1. **Persisting create-from-metadata (zarr-python).** A public entry point that
+   writes a new array from an `ArrayV{2,3}Metadata` (or metadata dict) to a store
+   path — e.g. `Array.create_from_dict` / a persisting `from_dict`. Replaces
+   `persist_array`'s reliance on `to_buffer_dict` + manual buffer writes (Task 7).
+2. **v2⇄v3 codec/metadata conversion (zarr-python or zarr-metadata).** A
+   spec-level `convert(metadata, target_format)` (or `ArrayV2Metadata.to_v3()`)
+   owning the numcodecs⇄v3-codec mapping. Replaces xarray's in-seam
+   `convert_zarr_metadata` (Task 6), which is the riskiest xarray-side code and is
+   really a spec concern that belongs upstream. If pursued first, Task 6 becomes a
+   thin call to that API instead of a bespoke mapping.
