@@ -79,3 +79,17 @@ def merge_flat_aliases(
             )
 
     return result
+
+
+def apply_variable_fields(
+    fragment: dict[str, object],
+    *,
+    shape: tuple[int, ...],
+    dims: tuple[str, ...],
+) -> dict[str, object]:
+    """Overwrite xarray-owned fields in the fragment from the Variable."""
+    result = dict(fragment)
+    result["shape"] = shape
+    if result.get("zarr_format") == 3:
+        result["dimension_names"] = dims
+    return result

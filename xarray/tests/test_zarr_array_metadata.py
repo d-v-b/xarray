@@ -54,3 +54,15 @@ def test_merge_flat_aliases_conflict_raises():
     # disagreeing chunks: raise, naming the field
     with pytest.raises(ValueError, match=r"chunks"):
         merge_flat_aliases(fragment, {"chunks": (10,)})
+
+
+@requires_zarr
+def test_apply_variable_fields_overrides_shape_and_dims():
+    from xarray.backends.zarr_array_metadata import apply_variable_fields
+
+    fragment = {"zarr_format": 3, "shape": (99,), "dimension_names": ("stale",)}
+    out = apply_variable_fields(fragment, shape=(4,), dims=("x",))
+    assert out["shape"] == (4,)
+    assert out["dimension_names"] == ("x",)
+    # input not mutated
+    assert fragment["shape"] == (99,)
