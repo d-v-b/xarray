@@ -66,3 +66,119 @@ def test_apply_variable_fields_overrides_shape_and_dims():
     assert out["dimension_names"] == ("x",)
     # input not mutated
     assert fragment["shape"] == (99,)
+
+
+@requires_zarr
+def test_convert_metadata_same_format_is_identity():
+    from xarray.backends.zarr_array_metadata import convert_zarr_metadata
+
+    frag = {"zarr_format": 3, "codecs": []}
+    assert (
+        convert_zarr_metadata(frag, 3) is frag or convert_zarr_metadata(frag, 3) == frag
+    )
+
+
+@requires_zarr
+def test_convert_metadata_v2_to_v3_roundtrips_chunks(tmp_path):
+    import zarr
+
+    from xarray.backends.zarr_array_metadata import (
+        convert_zarr_metadata,
+        read_metadata_fragment,
+    )
+
+    g = zarr.open_group(tmp_path / "v2.zarr", mode="w", zarr_format=2)
+    a = g.create_array("a", shape=(10,), chunks=(5,), dtype="f8", compressors=None)
+    v2 = read_metadata_fragment(a)
+
+    v3 = convert_zarr_metadata(v2, 3)
+    assert v3["zarr_format"] == 3
+    # chunk shape preserved across the conversion
+    assert tuple(v3["chunk_grid"]["configuration"]["chunk_shape"]) == (5,)
+
+
+@requires_zarr
+def test_convert_metadata_v2_to_v3_does_not_mutate_input(tmp_path):
+    import zarr
+
+    from xarray.backends.zarr_array_metadata import (
+        convert_zarr_metadata,
+        read_metadata_fragment,
+    )
+
+    g = zarr.open_group(tmp_path / "v2.zarr", mode="w", zarr_format=2)
+    a = g.create_array("a", shape=(10,), chunks=(5,), dtype="f8", compressors=None)
+    v2 = read_metadata_fragment(a)
+    v2_copy = dict(v2)
+
+    convert_zarr_metadata(v2, 3)
+    assert v2 == v2_copy
+
+
+@requires_zarr
+def test_convert_metadata_v3_to_v2_roundtrips_chunks(tmp_path):
+    import zarr
+
+    from xarray.backends.zarr_array_metadata import (
+        convert_zarr_metadata,
+        read_metadata_fragment,
+    )
+
+    g = zarr.open_group(tmp_path / "v3.zarr", mode="w", zarr_format=3)
+    a = g.create_array("a", shape=(10,), chunks=(5,), dtype="f8", compressors=None)
+    v3 = read_metadata_fragment(a)
+
+    v2 = convert_zarr_metadata(v3, 2)
+    assert v2["zarr_format"] == 2
+    assert tuple(v2["chunks"]) == (5,)
+    assert v2["compressor"] is None
+
+
+@requires_zarr
+def test_convert_metadata_v2_to_v3_maps_known_compressor(tmp_path):
+    import numcodecs
+    import zarr
+
+    from xarray.backends.zarr_array_metadata import (
+        convert_zarr_metadata,
+        read_metadata_fragment,
+    )
+
+    g = zarr.open_group(tmp_path / "v2.zarr", mode="w", zarr_format=2)
+    a = g.create_array(
+        "a",
+        shape=(10,),
+        chunks=(5,),
+        dtype="f8",
+        compressors=numcodecs.GZip(level=4),
+    )
+    v2 = read_metadata_fragment(a)
+
+    v3 = convert_zarr_metadata(v2, 3)
+    codec_names = [c["name"] for c in v3["codecs"]]
+    assert "gzip" in codec_names
+
+
+@requires_zarr
+def test_convert_metadata_v2_to_v3_raises_for_unmapped_filter(tmp_path):
+    import numcodecs
+    import zarr
+
+    from xarray.backends.zarr_array_metadata import (
+        convert_zarr_metadata,
+        read_metadata_fragment,
+    )
+
+    g = zarr.open_group(tmp_path / "v2.zarr", mode="w", zarr_format=2)
+    a = g.create_array(
+        "a",
+        shape=(10,),
+        chunks=(5,),
+        dtype="i4",
+        compressors=None,
+        filters=[numcodecs.Delta(dtype="i4")],
+    )
+    v2 = read_metadata_fragment(a)
+
+    with pytest.raises(NotImplementedError, match="delta"):
+        convert_zarr_metadata(v2, 3)

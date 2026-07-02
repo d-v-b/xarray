@@ -9,10 +9,31 @@ backend call sites.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
     from xarray.core.types import ZarrArray
+
+#: v2 compressor/filter ``id`` values that have a codec with a directly
+#: equivalent name in ``zarr.codecs`` (native zarr-python v3 codecs, not the
+#: ``zarr.codecs.numcodecs`` wrapper codecs). Verified against zarr-python
+#: 3.2.1: ``ArrayV2Metadata`` exposes no v2<->v3 conversion helper, and
+#: ``numcodecs.zarr3`` only re-exports numcodecs-as-v3-codec wrappers (e.g.
+#: ``numcodecs.blosc``) rather than translating a v2 metadata dict into v3
+#: metadata. Native v3 codecs with the same on-disk format as their v2
+#: numcodecs counterpart exist only for gzip/blosc/zstd; this mapping is
+#: intentionally limited to those.
+_V2_TO_V3_COMPRESSOR_NAMES = frozenset({"blosc", "gzip", "zstd"})
+
+# v2 blosc "shuffle" is a small int; v3 BloscCodec wants the string name.
+_BLOSC_SHUFFLE_V2_TO_V3: dict[object, object] = {
+    0: "noshuffle",
+    1: "shuffle",
+    2: "bitshuffle",
+}
+_BLOSC_SHUFFLE_V3_TO_V2: dict[object, object] = {
+    v: k for k, v in _BLOSC_SHUFFLE_V2_TO_V3.items()
+}
 
 
 def read_metadata_fragment(zarr_array: ZarrArray) -> dict[str, object]:
@@ -93,3 +114,181 @@ def apply_variable_fields(
     if result.get("zarr_format") == 3:
         result["dimension_names"] = dims
     return result
+
+
+def _v2_compressor_to_v3_codec(compressor: Mapping[str, object]) -> dict[str, object]:
+    """Translate a v2 ``compressor``/``filters`` entry into a v3 codec dict.
+
+    Only compressors with a native zarr-python v3 codec of the same name
+    (blosc, gzip, zstd) are supported; anything else raises
+    ``NotImplementedError`` naming the codec, per the module's scope
+    decision (see module docstring / task report).
+    """
+    codec_id = compressor.get("id")
+    if codec_id not in _V2_TO_V3_COMPRESSOR_NAMES:
+        raise NotImplementedError(f"no zarr v3 equivalent for codec {codec_id!r}")
+    if codec_id == "blosc":
+        shuffle = compressor.get("shuffle")
+        configuration: dict[str, object] = {
+            "typesize": compressor.get("typesize", 1),
+            "cname": compressor.get("cname"),
+            "clevel": compressor.get("clevel"),
+            "shuffle": _BLOSC_SHUFFLE_V2_TO_V3.get(shuffle, shuffle),
+            "blocksize": compressor.get("blocksize", 0),
+        }
+        return {"name": "blosc", "configuration": configuration}
+    if codec_id == "gzip":
+        return {"name": "gzip", "configuration": {"level": compressor.get("level")}}
+    # zstd
+    return {
+        "name": "zstd",
+        "configuration": {
+            "level": compressor.get("level", 0),
+            "checksum": bool(compressor.get("checksum", False)),
+        },
+    }
+
+
+def _v3_codec_to_v2_compressor(codec: Mapping[str, object]) -> dict[str, object]:
+    """Translate a v3 codec dict (blosc/gzip/zstd) into a v2 compressor dict."""
+    name = codec.get("name")
+    if name not in _V2_TO_V3_COMPRESSOR_NAMES:
+        raise NotImplementedError(f"no zarr v2 equivalent for codec {name!r}")
+    config = codec.get("configuration")
+    config = config if isinstance(config, Mapping) else {}
+    if name == "blosc":
+        shuffle = config.get("shuffle")
+        return {
+            "id": "blosc",
+            "cname": config.get("cname"),
+            "clevel": config.get("clevel"),
+            "shuffle": _BLOSC_SHUFFLE_V3_TO_V2.get(shuffle, shuffle),
+            "blocksize": config.get("blocksize", 0),
+        }
+    if name == "gzip":
+        return {"id": "gzip", "level": config.get("level")}
+    # zstd
+    return {"id": "zstd", "level": config.get("level", 0)}
+
+
+def _convert_dtype(dtype_str: object, *, target_format: Literal[2, 3]) -> object:
+    """Round-trip a dtype string/name through ``zarr.dtype`` for the target format.
+
+    Mirrors ``ArrayV2Metadata.to_dict``/``ArrayV3Metadata.to_dict``: the v2
+    ``dtype`` field is the bare ``"name"`` pulled out of the dtype's v2 JSON
+    spec, while the v3 ``data_type`` field is the dtype's v3 JSON spec
+    (itself already a bare string for non-structured dtypes).
+    """
+    from zarr.dtype import parse_dtype
+
+    source_format: Literal[2, 3] = 3 if target_format == 2 else 2
+    zdtype = parse_dtype(dtype_str, zarr_format=source_format)  # type: ignore[arg-type]
+    target_json = zdtype.to_json(zarr_format=target_format)
+    if target_format == 2 and isinstance(target_json, Mapping):
+        return target_json["name"]
+    return target_json
+
+
+def convert_zarr_metadata(
+    fragment: dict[str, object], target_format: Literal[2, 3]
+) -> dict[str, object]:
+    """Convert a zarr array metadata fragment between zarr formats v2 and v3.
+
+    ``fragment`` is a plain dict as returned by ``read_metadata_fragment``
+    (i.e. ``zarr_array.metadata.to_dict()``). Returns a new dict; ``fragment``
+    is never mutated.
+
+    Only the structural fields plus a minimal, verified compressor mapping
+    (no-compressor, and blosc/gzip/zstd with no array-array filters) are
+    supported. Anything else raises ``NotImplementedError`` naming the
+    unsupported codec -- see the module's design notes / task report for why
+    full arbitrary-codec conversion is out of scope here.
+    """
+    source_format = fragment["zarr_format"]
+    if source_format == target_format:
+        return fragment
+
+    if target_format == 3:
+        return _convert_v2_to_v3(fragment)
+    return _convert_v3_to_v2(fragment)
+
+
+def _convert_v2_to_v3(fragment: Mapping[str, object]) -> dict[str, object]:
+    filters = fragment.get("filters")
+    if filters:
+        raise NotImplementedError(
+            f"no zarr v3 equivalent for codec {filters!r} (array-array filters "
+            "are not supported by convert_zarr_metadata)"
+        )
+
+    chunks = fragment.get("chunks")
+    codecs: list[dict[str, object]] = [
+        {"name": "bytes", "configuration": {"endian": "little"}}
+    ]
+    compressor = fragment.get("compressor")
+    if isinstance(compressor, Mapping):
+        codecs.append(_v2_compressor_to_v3_codec(compressor))
+
+    separator = fragment.get("dimension_separator", ".")
+
+    return {
+        "zarr_format": 3,
+        "node_type": "array",
+        "shape": tuple(fragment["shape"]),  # type: ignore[arg-type]
+        "data_type": _convert_dtype(fragment.get("dtype"), target_format=3),
+        "chunk_grid": {
+            "name": "regular",
+            "configuration": {"chunk_shape": tuple(chunks)},  # type: ignore[arg-type]
+        },
+        "chunk_key_encoding": {
+            "name": "v2",
+            "configuration": {"separator": separator},
+        },
+        "codecs": codecs,
+        "fill_value": fragment.get("fill_value"),
+        "attributes": dict(fragment.get("attributes") or {}),  # type: ignore[call-overload]
+        "storage_transformers": [],
+    }
+
+
+def _convert_v3_to_v2(fragment: Mapping[str, object]) -> dict[str, object]:
+    codecs = fragment.get("codecs")
+    codecs = list(codecs) if isinstance(codecs, list) else []
+
+    compressor: dict[str, object] | None = None
+    for codec in codecs:
+        if not isinstance(codec, Mapping):
+            continue
+        name = codec.get("name")
+        if name == "bytes":
+            continue
+        compressor = _v3_codec_to_v2_compressor(codec)
+
+    chunk_grid = fragment.get("chunk_grid")
+    chunk_shape: object = None
+    if isinstance(chunk_grid, Mapping):
+        config = chunk_grid.get("configuration")
+        if isinstance(config, Mapping):
+            chunk_shape = config.get("chunk_shape")
+
+    chunk_key_encoding = fragment.get("chunk_key_encoding")
+    separator = "."
+    if isinstance(chunk_key_encoding, Mapping):
+        config = chunk_key_encoding.get("configuration")
+        if isinstance(config, Mapping) and "separator" in config:
+            separator = config["separator"]
+        elif chunk_key_encoding.get("name") == "default":
+            separator = "/"
+
+    return {
+        "zarr_format": 2,
+        "shape": tuple(fragment["shape"]),  # type: ignore[arg-type]
+        "chunks": tuple(chunk_shape) if chunk_shape is not None else None,  # type: ignore[arg-type]
+        "dtype": _convert_dtype(fragment.get("data_type"), target_format=2),
+        "compressor": compressor,
+        "filters": None,
+        "fill_value": fragment.get("fill_value"),
+        "order": "C",
+        "dimension_separator": separator,
+        "attributes": dict(fragment.get("attributes") or {}),  # type: ignore[call-overload]
+    }
