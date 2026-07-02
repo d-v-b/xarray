@@ -309,7 +309,7 @@ def build_canonical_metadata(
     *,
     shape: tuple[int, ...],
     dims: tuple[str, ...],
-    target_format: int,
+    target_format: Literal[2, 3],
     resolved_chunks: tuple[int, ...],
 ) -> dict[str, object]:
     """Produce the canonical, target-format metadata dict for a write."""
