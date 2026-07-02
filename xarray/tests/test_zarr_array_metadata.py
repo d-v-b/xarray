@@ -135,6 +135,34 @@ def test_convert_metadata_v3_to_v2_roundtrips_chunks(tmp_path):
 
 
 @requires_zarr
+def test_convert_metadata_v3_to_v2_preserves_compressor(tmp_path):
+    import zarr
+    import zarr.codecs
+
+    from xarray.backends.zarr_array_metadata import (
+        convert_zarr_metadata,
+        read_metadata_fragment,
+    )
+
+    g = zarr.open_group(tmp_path / "v3.zarr", mode="w", zarr_format=3)
+    a = g.create_array(
+        "a",
+        shape=(10,),
+        chunks=(5,),
+        dtype="f8",
+        compressors=zarr.codecs.GzipCodec(level=4),
+    )
+    v3 = read_metadata_fragment(a)
+    # zarr-python returns codecs as a tuple, not a list
+    assert isinstance(v3["codecs"], tuple)
+
+    v2 = convert_zarr_metadata(v3, 2)
+    assert v2["compressor"] is not None
+    assert v2["compressor"]["id"] == "gzip"
+    assert v2["compressor"]["level"] == 4
+
+
+@requires_zarr
 def test_convert_metadata_v2_to_v3_maps_known_compressor(tmp_path):
     import numcodecs
     import zarr

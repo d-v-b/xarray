@@ -253,7 +253,7 @@ def _convert_v2_to_v3(fragment: Mapping[str, object]) -> dict[str, object]:
 
 def _convert_v3_to_v2(fragment: Mapping[str, object]) -> dict[str, object]:
     codecs = fragment.get("codecs")
-    codecs = list(codecs) if isinstance(codecs, list) else []
+    codecs = list(codecs) if isinstance(codecs, (list, tuple)) else []
 
     compressor: dict[str, object] | None = None
     for codec in codecs:
