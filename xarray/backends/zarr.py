@@ -26,6 +26,7 @@ from xarray.backends.common import (
 from xarray.backends.store import StoreBackendEntrypoint
 from xarray.backends.zarr_array_metadata import (
     build_canonical_metadata,
+    derive_flat_aliases,
     persist_array,
     read_metadata_fragment,
 )
@@ -990,15 +991,7 @@ class ZarrStore(AbstractWritableDataStore):
         }
 
         if _zarr_v3():
-            encoding.update(
-                {
-                    "compressors": zarr_array.compressors,
-                    "filters": zarr_array.filters,
-                    "shards": zarr_array.shards,
-                }
-            )
-            if self.zarr_group.metadata.zarr_format == 3:
-                encoding.update({"serializer": zarr_array.serializer})
+            encoding.update(derive_flat_aliases(zarr_array, dimensions))
             encoding["zarr_array_metadata"] = read_metadata_fragment(zarr_array)
         else:
             encoding.update(
@@ -1256,6 +1249,7 @@ class ZarrStore(AbstractWritableDataStore):
             and self._write_empty is None
             and isinstance(resolved_chunks, tuple)
             and not encoding.get("shards")
+            and not encoding.get("write_empty_chunks")
         ):
             # Fast path: the variable already carries a spec-level metadata
             # fragment (e.g. round-tripped from an existing zarr array), and
@@ -1267,7 +1261,8 @@ class ZarrStore(AbstractWritableDataStore):
             #
             # We fall through to the legacy path below when:
             #  - there's no fragment (fresh in-memory data, or zarr-python 2)
-            #  - `self._write_empty` is set: the legacy path applies it via
+            #  - `self._write_empty` is set, or the variable's own encoding
+            #    carries `write_empty_chunks`: the legacy path applies it via
             #    the array's runtime `config`, which `persist_array` (a pure
             #    metadata-document write) does not handle. Rather than lose
             #    that setting, we defer to `zarr_group.create()` in that case.

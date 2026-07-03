@@ -12,6 +12,7 @@ from collections.abc import Iterable, Mapping
 from typing import TYPE_CHECKING, Literal, cast
 
 if TYPE_CHECKING:
+    from zarr.storage import StorePath
     from zarr_metadata import ArrayMetadataV2, ArrayMetadataV3
 
     from xarray.core.types import ZarrArray
@@ -408,7 +409,7 @@ def build_canonical_metadata(
     return cast("ZarrArrayMetadata", mutable_fragment)
 
 
-def persist_array(store_path, fragment: ZarrArrayMetadata) -> None:
+def persist_array(store_path: StorePath, fragment: ZarrArrayMetadata) -> None:
     """Persist a new zarr array from a canonical metadata dict.
 
     ``ArrayV{2,3}Metadata.from_dict`` builds an in-memory object that does NOT

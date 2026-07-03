@@ -4601,6 +4601,34 @@ def test_v2_to_v3_roundtrip_with_compression(tmp_path) -> None:
 
 
 @requires_zarr
+def test_v2_to_v3_roundtrip_write_empty_chunks(tmp_path) -> None:
+    """Regression test: a variable whose ``encoding["write_empty_chunks"]`` is
+    set (with the store-level ``write_empty_chunks`` parameter left unset)
+    must not silently take the metadata-fragment fast path in
+    ``_create_new_array``, since ``persist_array`` is a pure metadata-document
+    write and has no way to honor that runtime store-config setting. Such
+    variables must fall through to the legacy ``zarr_group.create()`` path,
+    which does honor it via ``create(config=...)``.
+    """
+    from xarray.backends.zarr import _zarr_v3
+
+    if not _zarr_v3():
+        pytest.skip("requires zarr-python 3")
+
+    ds = xr.Dataset({"a": ("x", np.arange(10.0))}).chunk({"x": 5})
+    ds.to_zarr(tmp_path / "v3.zarr", zarr_format=3, mode="w")
+
+    opened = xr.open_zarr(tmp_path / "v3.zarr")
+    opened["a"].encoding["write_empty_chunks"] = False
+
+    # Must not raise, and must not silently drop/mis-handle the setting.
+    opened.to_zarr(tmp_path / "v3_rewrite.zarr", zarr_format=3, mode="w")
+
+    back = xr.open_zarr(tmp_path / "v3_rewrite.zarr")
+    assert_identical(back.compute(), ds.compute())
+
+
+@requires_zarr
 def test_v2_to_v3_roundtrip_fill_value_not_stale(tmp_path) -> None:
     """Regression test: the fragment fast path in ``_create_new_array`` must
     not persist the metadata fragment's own (stale) ``fill_value`` -- it must
