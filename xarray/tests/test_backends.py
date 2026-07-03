@@ -4601,6 +4601,62 @@ def test_v2_to_v3_roundtrip_with_compression(tmp_path) -> None:
 
 
 @requires_zarr
+def test_fragment_and_rechunk_resolved_chunks_win(tmp_path) -> None:
+    """End-to-end: a stale ``zarr_array_metadata`` fragment's ``chunk_grid``
+    must not win over the resolved chunk size when the two disagree.
+
+    ``open_zarr`` attaches a ``zarr_array_metadata`` fragment (carrying the
+    on-disk ``chunk_grid``) to each variable's encoding. If the user then
+    rechunks the in-memory variable to a different chunk size and writes it
+    out again, the fast path in ``_create_new_array`` drops ``chunks`` from
+    the flat-alias merge before calling ``build_canonical_metadata``, and the
+    resolved chunk size (from the variable's actual dask chunking) is stamped
+    in authoritatively via ``_set_chunk_shape``. So this must succeed and
+    write the new chunk size -- not silently keep the stale fragment's chunk
+    size.
+
+    The stale flat ``encoding["chunks"]`` alias (also carried over from
+    ``open_zarr``) is removed here because it trips an unrelated,
+    pre-existing safety check in ``xarray.backends.chunks``
+    (``validate_grid_chunks_alignment``, which validates
+    ``encoding["chunks"]`` against the Dask chunk boundaries directly,
+    independent of the ``zarr_array_metadata`` fragment seam this test
+    targets) when it disagrees with the new, unaligned Dask chunking.
+    Clearing it isolates the fragment-vs-resolved-chunks behavior under test.
+    """
+    from xarray.backends.zarr import _zarr_v3
+
+    if not _zarr_v3():
+        pytest.skip("requires zarr-python 3")
+
+    import zarr
+
+    p1 = tmp_path / "v1.zarr"
+    p2 = tmp_path / "v2.zarr"
+
+    ds = xr.Dataset({"a": ("x", np.arange(10.0))}).chunk({"x": 5})
+    ds.to_zarr(p1, zarr_format=3, mode="w")
+
+    opened = xr.open_zarr(p1)
+    assert opened["a"].encoding["zarr_array_metadata"]["chunk_grid"]["configuration"][
+        "chunk_shape"
+    ] == (5,)
+
+    rechunked = opened.chunk({"x": 2})
+    del rechunked["a"].encoding["chunks"]
+
+    # Must not raise, despite the fragment's stale chunk_grid disagreeing
+    # with the new chunk size.
+    rechunked.to_zarr(p2, zarr_format=3, mode="w")
+
+    za = zarr.open_array(p2, path="a", mode="r")
+    assert za.chunks == (2,)
+
+    back = xr.open_zarr(p2)
+    assert_identical(back.compute(), ds.compute())
+
+
+@requires_zarr
 def test_v2_to_v3_roundtrip_write_empty_chunks(tmp_path) -> None:
     """Regression test: a variable whose ``encoding["write_empty_chunks"]`` is
     set (with the store-level ``write_empty_chunks`` parameter left unset)

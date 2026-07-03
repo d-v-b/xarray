@@ -93,7 +93,18 @@ def _fragment_chunk_shape(fragment: Mapping[str, object]) -> tuple[int, ...] | N
 def merge_flat_aliases(
     fragment: ZarrArrayMetadata, encoding: Mapping[str, object]
 ) -> ZarrArrayMetadata:
-    """Fold legacy flat keys into ``fragment``; raise on disagreement."""
+    """Fold legacy flat keys into ``fragment``; raise on disagreement.
+
+    This only defensively checks ``chunks`` at the seam boundary. There is no
+    analogous ``fill_value`` check: ``build_canonical_metadata`` (the sole
+    caller) always overwrites ``fragment["fill_value"]`` authoritatively via
+    ``_set_fill_value`` immediately afterward, so any comparison here would be
+    both discarded and unreliable -- ``encoding["fill_value"]`` is a raw
+    Python/numpy scalar while ``result["fill_value"]`` is the fragment's
+    JSON-serialized form (e.g. the string ``"NaN"`` for a v3 NaN fill value),
+    and a naive ``!=`` between those representations can spuriously disagree
+    on values that actually agree (e.g. ``nan != nan``).
+    """
     result: dict[str, object] = dict(fragment)
 
     if "chunks" in encoding and encoding["chunks"] is not None:
@@ -103,14 +114,6 @@ def merge_flat_aliases(
             raise ValueError(
                 "conflicting 'chunks': encoding has "
                 f"{flat!r} but zarr_array_metadata has {frag_chunks!r}"
-            )
-
-    if "fill_value" in encoding and "fill_value" in result:
-        if encoding["fill_value"] != result["fill_value"]:
-            raise ValueError(
-                "conflicting 'fill_value': encoding has "
-                f"{encoding['fill_value']!r} but zarr_array_metadata has "
-                f"{result['fill_value']!r}"
             )
 
     # `result` is a faithful copy of `fragment`, whose shape mypy cannot infer
