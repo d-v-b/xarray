@@ -1110,6 +1110,54 @@ For example:
     Not all native zarr compression and filtering options have been tested with
     xarray.
 
+.. _io.zarr.array_metadata:
+
+Controlling the full zarr array metadata
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The flat encoding keys shown above (``chunks``, ``compressors``, ``filters``,
+``shards``, ``serializer``, ...) cover the most common cases, but each only
+controls a single piece of a zarr array's on-disk metadata. Whenever a
+variable is opened from a Zarr store, xarray also stashes the array's
+complete spec-level metadata document (as returned by
+``zarr.Array.metadata.to_dict()``) on ``encoding["zarr_array_metadata"]``.
+Writing that variable back out re-applies this fragment, which is what lets
+xarray convert an array's on-disk representation between zarr format v2 and
+v3: opening a v2 store and writing it back out with ``zarr_format=3`` (or
+vice versa) automatically translates the stored metadata, including its
+compressors, to the target format's spec:
+
+.. jupyter-execute::
+    :hide-code:
+
+    tempdir.cleanup()
+    tempdir = tempfile.TemporaryDirectory()
+
+.. jupyter-execute::
+
+    v2_filename = os.path.join(tempdir.name, "v2.zarr")
+    v3_filename = os.path.join(tempdir.name, "v3.zarr")
+
+    ds.to_zarr(v2_filename, consolidated=False, zarr_format=2)
+
+    # opening the store carries its zarr_format-2 metadata fragment along on
+    # the variable's encoding
+    reopened = xr.open_zarr(v2_filename, consolidated=False)
+    reopened["foo"].encoding["zarr_array_metadata"]["zarr_format"]
+
+.. jupyter-execute::
+
+    # writing it back out as zarr_format 3 converts the fragment for you
+    reopened.to_zarr(v3_filename, consolidated=False, zarr_format=3)
+
+``encoding["zarr_array_metadata"]`` can also be set explicitly (e.g. to a
+dict copied from another array's ``metadata.to_dict()``) to control the
+storage layout directly, and is the preferred way to do so: it is the single
+place that describes the complete on-disk array metadata. The flat keys
+remain fully supported as convenient aliases for the pieces of metadata they
+each cover, and both forms may be combined as long as they do not disagree.
+The flat keys are not deprecated.
+
 .. _io.zarr.appending:
 
 Modifying existing Zarr stores

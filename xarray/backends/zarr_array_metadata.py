@@ -8,11 +8,15 @@ backend call sites.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from typing import TYPE_CHECKING, Literal
+from collections.abc import Iterable, Mapping
+from typing import TYPE_CHECKING, Literal, cast
 
 if TYPE_CHECKING:
+    from zarr_metadata import ArrayMetadataV2, ArrayMetadataV3
+
     from xarray.core.types import ZarrArray
+
+    ZarrArrayMetadata = ArrayMetadataV2 | ArrayMetadataV3
 
 #: v2 compressor/filter ``id`` values that have a codec with a directly
 #: equivalent name in ``zarr.codecs`` (native zarr-python v3 codecs, not the
@@ -36,9 +40,9 @@ _BLOSC_SHUFFLE_V3_TO_V2: dict[object, object] = {
 }
 
 
-def read_metadata_fragment(zarr_array: ZarrArray) -> dict[str, object]:
+def read_metadata_fragment(zarr_array: ZarrArray) -> ZarrArrayMetadata:
     """Return the spec metadata document for a zarr array as a plain dict."""
-    return dict(zarr_array.metadata.to_dict())
+    return dict(zarr_array.metadata.to_dict())  # type: ignore[return-value]
 
 
 def derive_flat_aliases(
@@ -63,6 +67,13 @@ def derive_flat_aliases(
     return aliases
 
 
+def _as_int_tuple(value: object) -> tuple[int, ...]:
+    """Narrow an ``object`` known to be an iterable of ints to ``tuple[int, ...]``."""
+    if not isinstance(value, Iterable):
+        raise TypeError(f"expected an iterable of ints, got {value!r}")
+    return tuple(int(v) for v in value)
+
+
 def _fragment_chunk_shape(fragment: Mapping[str, object]) -> tuple[int, ...] | None:
     if fragment.get("zarr_format") == 3:
         grid = fragment.get("chunk_grid")
@@ -70,20 +81,20 @@ def _fragment_chunk_shape(fragment: Mapping[str, object]) -> tuple[int, ...] | N
             config = grid.get("configuration")
             if isinstance(config, Mapping):
                 shape = config.get("chunk_shape")
-                return tuple(shape) if shape is not None else None
+                return _as_int_tuple(shape) if shape is not None else None
         return None
     chunks = fragment.get("chunks")
-    return tuple(chunks) if chunks is not None else None
+    return _as_int_tuple(chunks) if chunks is not None else None
 
 
 def merge_flat_aliases(
-    fragment: dict[str, object], encoding: Mapping[str, object]
-) -> dict[str, object]:
+    fragment: ZarrArrayMetadata, encoding: Mapping[str, object]
+) -> ZarrArrayMetadata:
     """Fold legacy flat keys into ``fragment``; raise on disagreement."""
-    result = dict(fragment)
+    result: dict[str, object] = dict(fragment)
 
     if "chunks" in encoding and encoding["chunks"] is not None:
-        flat = tuple(encoding["chunks"])  # type: ignore[arg-type]
+        flat: tuple[int, ...] = _as_int_tuple(encoding["chunks"])
         frag_chunks = _fragment_chunk_shape(result)
         if frag_chunks is not None and frag_chunks != flat:
             raise ValueError(
@@ -99,21 +110,24 @@ def merge_flat_aliases(
                 f"{result['fill_value']!r}"
             )
 
-    return result
+    # `result` is a faithful copy of `fragment`, whose shape mypy cannot infer
+    # through `dict(...)`; narrow it back to the TypedDict union it started as.
+    return cast("ZarrArrayMetadata", result)
 
 
 def apply_variable_fields(
-    fragment: dict[str, object],
+    fragment: ZarrArrayMetadata,
     *,
     shape: tuple[int, ...],
     dims: tuple[str, ...],
-) -> dict[str, object]:
+) -> ZarrArrayMetadata:
     """Overwrite xarray-owned fields in the fragment from the Variable."""
-    result = dict(fragment)
+    result: dict[str, object] = dict(fragment)
     result["shape"] = shape
     if result.get("zarr_format") == 3:
         result["dimension_names"] = dims
-    return result
+    # See `merge_flat_aliases` for why this cast is needed.
+    return cast("ZarrArrayMetadata", result)
 
 
 def _v2_compressor_to_v3_codec(compressor: Mapping[str, object]) -> dict[str, object]:
@@ -190,8 +204,8 @@ def _convert_dtype(dtype_str: object, *, target_format: Literal[2, 3]) -> object
 
 
 def convert_zarr_metadata(
-    fragment: dict[str, object], target_format: Literal[2, 3]
-) -> dict[str, object]:
+    fragment: ZarrArrayMetadata, target_format: Literal[2, 3]
+) -> ZarrArrayMetadata:
     """Convert a zarr array metadata fragment between zarr formats v2 and v3.
 
     ``fragment`` is a plain dict as returned by ``read_metadata_fragment``
@@ -208,9 +222,13 @@ def convert_zarr_metadata(
     if source_format == target_format:
         return fragment
 
+    # The `_convert_*` helpers build the target-format dict field-by-field as
+    # a plain `dict[str, object]` (some fields go through further conversion
+    # helpers with their own narrow `type: ignore`s); cast the fully-built
+    # result back to the TypedDict union it structurally matches.
     if target_format == 3:
-        return _convert_v2_to_v3(fragment)
-    return _convert_v3_to_v2(fragment)
+        return cast("ZarrArrayMetadata", _convert_v2_to_v3(fragment))
+    return cast("ZarrArrayMetadata", _convert_v3_to_v2(fragment))
 
 
 def _convert_v2_to_v3(fragment: Mapping[str, object]) -> dict[str, object]:
@@ -371,21 +389,26 @@ def build_canonical_metadata(
     target_format: Literal[2, 3],
     resolved_chunks: tuple[int, ...],
     resolved_fill_value: object,
-) -> dict[str, object]:
+) -> ZarrArrayMetadata:
     """Produce the canonical, target-format metadata dict for a write."""
-    fragment = encoding["zarr_array_metadata"]
-    if not isinstance(fragment, dict):
+    raw_fragment = encoding["zarr_array_metadata"]
+    if not isinstance(raw_fragment, dict):
         raise TypeError("encoding['zarr_array_metadata'] must be a dict")
+    # The runtime value is a plain dict shaped like the fragment TypedDicts
+    # (built by `read_metadata_fragment`/`convert_zarr_metadata`); narrow it
+    # here since mypy cannot verify a `dict[str, object]`'s shape statically.
+    fragment = cast("ZarrArrayMetadata", raw_fragment)
 
     fragment = merge_flat_aliases(fragment, encoding)
     fragment = convert_zarr_metadata(fragment, target_format)
     fragment = apply_variable_fields(fragment, shape=shape, dims=dims)
-    _set_chunk_shape(fragment, resolved_chunks)
-    _set_fill_value(fragment, resolved_fill_value, zarr_format=target_format)
-    return fragment
+    mutable_fragment: dict[str, object] = dict(fragment)
+    _set_chunk_shape(mutable_fragment, resolved_chunks)
+    _set_fill_value(mutable_fragment, resolved_fill_value, zarr_format=target_format)
+    return cast("ZarrArrayMetadata", mutable_fragment)
 
 
-def persist_array(store_path, fragment: dict[str, object]) -> None:
+def persist_array(store_path, fragment: ZarrArrayMetadata) -> None:
     """Persist a new zarr array from a canonical metadata dict.
 
     ``ArrayV{2,3}Metadata.from_dict`` builds an in-memory object that does NOT
@@ -395,10 +418,15 @@ def persist_array(store_path, fragment: dict[str, object]) -> None:
     from zarr.core.metadata import ArrayV2Metadata, ArrayV3Metadata
     from zarr.core.sync import sync
 
-    if fragment.get("zarr_format") == 2:
-        meta = ArrayV2Metadata.from_dict(fragment)
+    # `from_dict` wants a plain, unstructured dict (it's what `to_dict()`
+    # itself round-trips through); the TypedDict param exists for callers.
+    raw_fragment: dict[str, object] = dict(fragment)
+
+    meta: ArrayV2Metadata | ArrayV3Metadata
+    if raw_fragment.get("zarr_format") == 2:
+        meta = ArrayV2Metadata.from_dict(raw_fragment)
     else:
-        meta = ArrayV3Metadata.from_dict(fragment)
+        meta = ArrayV3Metadata.from_dict(raw_fragment)  # type: ignore[arg-type]
 
     async def _write() -> None:
         buffers = meta.to_buffer_dict(default_buffer_prototype())
