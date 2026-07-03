@@ -9,7 +9,7 @@ backend call sites.
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from typing import TYPE_CHECKING, Literal, cast
 
 import numpy as np
@@ -134,6 +134,178 @@ def apply_variable_fields(
     if result.get("zarr_format") == 3:
         result["dimension_names"] = dims
     # See `merge_flat_aliases` for why this cast is needed.
+    return cast("ZarrArrayMetadata", result)
+
+
+def _codec_to_dict(codec: object) -> dict[str, object]:
+    """Normalize a single v3 codec-like value to its ``to_dict()`` JSON form.
+
+    Accepts either a live ``zarr.abc.codec.Codec`` (verified empirically:
+    ``.to_dict()`` returns exactly ``{"name": ..., "configuration": ...}``,
+    the same shape used in a v3 fragment's ``codecs`` list) or an
+    already-JSON ``Mapping`` (e.g. a value round-tripped through a dict),
+    which is returned as-is (copied).
+    """
+    if isinstance(codec, Mapping):
+        return dict(codec)
+    to_dict = getattr(codec, "to_dict", None)
+    if callable(to_dict):
+        return cast("dict[str, object]", to_dict())
+    raise TypeError(
+        f"expected a zarr v3 codec object or a JSON-shaped dict, got {codec!r}"
+    )
+
+
+def _codec_to_config(codec: object) -> dict[str, object]:
+    """Normalize a single v2 codec-like value to its ``get_config()`` form.
+
+    Accepts either a live ``numcodecs`` codec (verified empirically:
+    ``.get_config()`` returns exactly ``{"id": ..., ...}``, the same shape
+    used in a v2 fragment's ``compressor``/``filters`` fields) or an
+    already-JSON ``Mapping``, which is returned as-is (copied).
+    """
+    if isinstance(codec, Mapping):
+        return dict(codec)
+    get_config = getattr(codec, "get_config", None)
+    if callable(get_config):
+        return cast("dict[str, object]", get_config())
+    raise TypeError(
+        f"expected a numcodecs codec object or a JSON-shaped dict, got {codec!r}"
+    )
+
+
+def _as_codec_list(
+    value: object, *, to_dict: Callable[[object], dict[str, object]]
+) -> list[dict[str, object]]:
+    """Normalize a flat-alias codec value to a list of JSON-shaped dicts.
+
+    The flat encoding keys (``compressors``, ``filters``, ``serializer``,
+    ``compressor``) accept, per zarr-python's own ``*Like`` type aliases
+    (``CompressorsLike``/``FiltersLike``/``SerializerLike`` in
+    ``zarr.core.array``, verified against zarr-python 3.2.1): a single codec
+    object, a single JSON dict, an iterable of either, or ``None``. Codec
+    objects (both v3 ``Codec`` and ``numcodecs`` codecs) are not
+    ``Iterable``, so a bare codec and an iterable-of-codecs are
+    distinguishable by ``isinstance(value, Iterable)`` alone; a bare dict
+    *is* ``Iterable`` (over its keys), so ``Mapping`` must be checked first
+    to avoid misreading a single JSON codec dict as "an iterable of its
+    keys".
+    """
+    if value is None:
+        return []
+    if isinstance(value, Mapping):
+        return [to_dict(value)]
+    if isinstance(value, Iterable):
+        return [to_dict(v) for v in value]
+    return [to_dict(value)]
+
+
+def _fold_flat_codecs(
+    fragment: ZarrArrayMetadata, encoding: Mapping[str, object]
+) -> ZarrArrayMetadata:
+    """Overwrite the fragment's codec fields from the flat encoding aliases.
+
+    Makes the flat codec keys (``compressors``, ``filters``, ``serializer``
+    for a v3-shaped fragment; ``compressor``, ``filters`` for a v2-shaped
+    fragment) authoritative over whatever the fragment already carries, the
+    same way ``_set_dtype``/``_set_fill_value``/``_set_chunk_shape`` make
+    their corresponding flat values authoritative. This runs on the
+    fragment's *source* format, before ``convert_zarr_metadata`` translates
+    it to the target format, so the folded codecs are written in the same
+    representation the rest of the (still-source-format) fragment is in.
+
+    Only keys actually present in ``encoding`` are folded; any codec
+    sub-group not present is left as whatever the fragment already had, so
+    e.g. mutating only ``encoding["compressors"]`` preserves the existing
+    filters/serializer untouched.
+    """
+    result: dict[str, object] = dict(fragment)
+
+    if result.get("zarr_format") == 3:
+        raw_codecs = result.get("codecs")
+        codecs: list[Mapping[str, object]] = (
+            [c for c in raw_codecs if isinstance(c, Mapping)]
+            if isinstance(raw_codecs, Iterable)
+            else []
+        )
+
+        # Split the existing codecs list into its three sub-groups so any
+        # sub-group absent from `encoding` can be preserved unchanged.
+        # Verified empirically (zarr-python 3.2.1): a v3 `codecs` list is
+        # ordered array-array filters, then exactly one array->bytes
+        # serializer (`bytes` for numeric arrays, or a vlen codec such as
+        # `vlen-utf8` for strings -- always present), then bytes->bytes
+        # compressors.
+        serializer_names = {"bytes", *_V3_VLEN_SERIALIZER_NAMES}
+        existing_filters: list[dict[str, object]] = []
+        existing_serializer: dict[str, object] | None = None
+        existing_compressors: list[dict[str, object]] = []
+        for codec in codecs:
+            name = codec.get("name")
+            if existing_serializer is None and name not in serializer_names:
+                existing_filters.append(dict(codec))
+            elif existing_serializer is None:
+                existing_serializer = dict(codec)
+            else:
+                existing_compressors.append(dict(codec))
+
+        if "filters" in encoding:
+            new_filters = _as_codec_list(encoding["filters"], to_dict=_codec_to_dict)
+        else:
+            new_filters = existing_filters
+
+        if "serializer" in encoding and encoding["serializer"] is not None:
+            new_serializer = _codec_to_dict(encoding["serializer"])
+        elif existing_serializer is not None:
+            new_serializer = existing_serializer
+        else:
+            new_serializer = {"name": "bytes", "configuration": {"endian": "little"}}
+
+        if "compressors" in encoding:
+            new_compressors = _as_codec_list(
+                encoding["compressors"], to_dict=_codec_to_dict
+            )
+        else:
+            new_compressors = existing_compressors
+
+        result["codecs"] = tuple([*new_filters, new_serializer, *new_compressors])
+        return cast("ZarrArrayMetadata", result)
+
+    # v2-shaped fragment: `compressor` is a single (or absent/None) codec,
+    # `filters` is a list (or absent/None -- verified empirically: an
+    # ArrayV2Metadata with no filters serializes `"filters": null`, not
+    # `"filters": []`).
+    if "compressor" in encoding:
+        compressor_value = encoding["compressor"]
+        result["compressor"] = (
+            None if compressor_value is None else _codec_to_config(compressor_value)
+        )
+    elif "compressors" in encoding:
+        # `derive_flat_aliases`/user code may instead set the v3-style
+        # plural `compressors` key even against a v2 fragment (e.g. it was
+        # copied wholesale from a v3-opened variable); accept a single
+        # codec or a length<=1 iterable, since v2 supports only one
+        # compressor.
+        compressors_list = _as_codec_list(
+            encoding["compressors"], to_dict=_codec_to_config
+        )
+        if len(compressors_list) > 1:
+            raise NotImplementedError(
+                "zarr v2 arrays support at most one compressor, got "
+                f"{len(compressors_list)} in encoding['compressors']"
+            )
+        result["compressor"] = compressors_list[0] if compressors_list else None
+
+    if "filters" in encoding:
+        filters_value = encoding["filters"]
+        if filters_value is None or (
+            isinstance(filters_value, tuple) and len(filters_value) == 0
+        ):
+            result["filters"] = None
+        else:
+            filters_list = _as_codec_list(filters_value, to_dict=_codec_to_config)
+            result["filters"] = filters_list or None
+
     return cast("ZarrArrayMetadata", result)
 
 
@@ -538,6 +710,17 @@ def build_canonical_metadata(
     fragment = cast("ZarrArrayMetadata", raw_fragment)
 
     fragment = merge_flat_aliases(fragment, encoding)
+    # Make the flat codec keys authoritative over the fragment's own,
+    # possibly-stale codecs -- e.g. a user setting
+    # `encoding["compressors"] = GzipCodec(level=9)` after opening must be
+    # honored, not silently dropped in favor of the source array's original
+    # codecs. This must run in the fragment's *source* format (before
+    # `convert_zarr_metadata` below translates the whole fragment to
+    # `target_format`), so the folded-in codec values -- which are
+    # source-format codec objects/dicts as populated by `open_store_variable`
+    # or set by the user -- land in the representation `convert_zarr_metadata`
+    # expects to translate.
+    fragment = _fold_flat_codecs(fragment, encoding)
     fragment = convert_zarr_metadata(fragment, target_format)
     fragment = apply_variable_fields(fragment, shape=shape, dims=dims)
     mutable_fragment: dict[str, object] = dict(fragment)

@@ -4856,6 +4856,134 @@ def test_v3_to_v2_roundtrip_fast_path(tmp_path) -> None:
     assert za.compressors[0].level == 3
 
 
+@requires_zarr
+def test_fast_path_honors_in_place_compressor_change(tmp_path) -> None:
+    """Regression test for the fast-path ``zarr_array_metadata`` seam
+    silently dropping an in-place codec change: opening a store, mutating
+    only ``encoding["compressors"]``, and writing back out (same format)
+    must persist the *new* compressor, not the fragment's original one.
+
+    Before the fix, ``build_canonical_metadata`` consumed the fragment's
+    codecs as-is and never folded the flat ``compressors``/``filters``/
+    ``serializer``/``compressor`` encoding keys into it, so this mutation
+    was silently discarded with no error.
+    """
+    from xarray.backends.zarr import _zarr_v3
+
+    if not _zarr_v3():
+        pytest.skip("requires zarr-python 3")
+
+    import zarr
+    import zarr.codecs
+
+    p_src = tmp_path / "src.zarr"
+    p_dst = tmp_path / "dst.zarr"
+
+    values = np.arange(20.0)
+    ds = xr.Dataset({"a": ("x", values)}).chunk({"x": 6})
+    ds.to_zarr(
+        p_src,
+        zarr_format=3,
+        mode="w",
+        encoding={"a": {"compressors": zarr.codecs.GzipCodec(level=1)}},
+    )
+
+    opened = xr.open_zarr(p_src)
+    opened["a"].encoding["compressors"] = zarr.codecs.GzipCodec(level=9)
+    opened.to_zarr(p_dst, mode="w")
+
+    za = zarr.open(p_dst)["a"]
+    assert za.metadata.zarr_format == 3
+    codec_names_and_config = [
+        (c["name"], c.get("configuration")) for c in za.metadata.to_dict()["codecs"]
+    ]
+    assert ("gzip", {"level": 9}) in codec_names_and_config
+    assert ("gzip", {"level": 1}) not in codec_names_and_config
+
+    back = xr.open_zarr(p_dst)
+    assert_identical(back.compute(), ds.compute())
+
+
+@requires_zarr
+def test_fast_path_cross_format_write_of_unchanged_array_still_works(
+    tmp_path,
+) -> None:
+    """Regression test: folding the flat codec keys into the fragment must
+    not break a cross-format (v3 -> v2) write of an array whose codecs were
+    never touched -- the folded-in codecs are just the fragment's own
+    original ones (round-tripped through ``open_store_variable``'s flat
+    aliases), so ``convert_zarr_metadata`` still sees the same compressor it
+    would have without any folding.
+    """
+    from xarray.backends.zarr import _zarr_v3
+
+    if not _zarr_v3():
+        pytest.skip("requires zarr-python 3")
+
+    import zarr
+    import zarr.codecs
+
+    p_src = tmp_path / "src.zarr"
+    p_dst = tmp_path / "dst.zarr"
+
+    values = np.arange(20.0)
+    ds = xr.Dataset({"a": ("x", values)}).chunk({"x": 6})
+    ds.to_zarr(
+        p_src,
+        zarr_format=3,
+        mode="w",
+        encoding={"a": {"compressors": zarr.codecs.GzipCodec(level=3)}},
+    )
+
+    opened = xr.open_zarr(p_src)
+    opened.to_zarr(p_dst, zarr_format=2, mode="w")
+
+    za = zarr.open_array(p_dst, path="a", mode="r")
+    assert za.metadata.zarr_format == 2
+    assert za.compressors[0].codec_id == "gzip"
+    assert za.compressors[0].level == 3
+
+    back = xr.open_zarr(p_dst)
+    assert_identical(back.compute(), ds.compute())
+
+
+@requires_zarr
+def test_fast_path_honors_in_place_filters_change(tmp_path) -> None:
+    """Regression test: an in-place change to ``encoding["filters"]`` (the
+    array-array codec sub-group) must also be honored by the fast path, the
+    same way ``compressors`` is -- ``_fold_flat_codecs`` folds all three
+    codec sub-groups (``filters``, ``serializer``, ``compressors``), not
+    just the compressor.
+    """
+    from xarray.backends.zarr import _zarr_v3
+
+    if not _zarr_v3():
+        pytest.skip("requires zarr-python 3")
+
+    import zarr
+    import zarr.codecs
+    from zarr.codecs.numcodecs import Delta
+
+    p_src = tmp_path / "src.zarr"
+    p_dst = tmp_path / "dst.zarr"
+
+    values = np.arange(20.0)
+    ds = xr.Dataset({"a": ("x", values)}).chunk({"x": 6})
+    ds.to_zarr(p_src, zarr_format=3, mode="w")
+
+    opened = xr.open_zarr(p_src)
+    assert opened["a"].encoding["filters"] == ()
+    opened["a"].encoding["filters"] = (Delta(dtype="float64"),)
+    opened.to_zarr(p_dst, mode="w")
+
+    za = zarr.open(p_dst)["a"]
+    codec_names = [c["name"] for c in za.metadata.to_dict()["codecs"]]
+    assert "numcodecs.delta" in codec_names
+
+    back = xr.open_zarr(p_dst)
+    assert_identical(back.compute(), ds.compute())
+
+
 @requires_scipy
 class TestScipyInMemoryData(CFEncodedBase, NetCDF3Only, InMemoryNetCDF):
     engine: T_NetcdfEngine = "scipy"
