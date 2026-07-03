@@ -49,10 +49,17 @@ during a deprecation period.
    `attributes`, `dimension_names`, but on write those are regenerated from the
    `Variable`/`attrs`/`dims` and overwrite whatever the fragment holds. The
    fragment is authoritative only for storage layout.
-3. **Alias conflict is an error.** Legacy flat keys are normalized into one
-   canonical metadata dict; if a flat key and the corresponding fragment field
-   disagree, raise `ValueError` naming the field. Flat keys with no fragment
-   counterpart fold in.
+3. **Variable/resolved value wins (authoritative overwrite).** As implemented,
+   the write path overwrites the storage-layout fields that matter —
+   `shape`, `dimension_names`, chunk grid, `data_type`, and `fill_value` — from
+   the write itself (via `_set_chunk_shape`/`_set_dtype`/`_set_fill_value`), so a
+   stale fragment value is superseded rather than treated as a conflict (e.g.
+   opening then rechunking, then writing, uses the new chunks). `merge_flat_aliases`
+   retains a defensive `chunks` conflict check at the seam boundary (unit-tested),
+   but because the fast path resolves chunks authoritatively it does not surface as
+   an error through `to_zarr`. NOTE: this supersedes the original "alias conflict is
+   an error" intent — the matured design favors authoritative overwrite, which is
+   simpler and avoids false conflicts on legitimate rechunking.
 4. **Read populates both; flat keys stay fully supported for now.** Read sets
    both the fragment and the derived flat aliases so existing code keeps working.
    Emitting a `DeprecationWarning` on flat-key use is DEFERRED to a separate
@@ -162,8 +169,10 @@ touches.
 ## Testing
 
 - Round-trip fidelity: v2→v2, v3→v3, and v2→v3 / v3→v2 (currently broken).
-- Fragment/alias conflict raises; alias-only and fragment-only inputs both work.
-- Variable-owned fields always win over stale fragment fields.
+- `merge_flat_aliases` defensive `chunks` conflict check (unit-level); end-to-end
+  a stale fragment + rechunk resolves to the new chunks (resolved value wins, no error).
+- Variable-owned fields (shape/dims/chunk-grid/dtype/fill_value) always win over stale
+  fragment fields, end-to-end through `to_zarr`.
 - `fill_value` matrix across formats and `use_zarr_fill_value_as_mask`.
 - (Deferred to follow-up PR) `DeprecationWarning` on flat-key use.
 
