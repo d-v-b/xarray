@@ -798,7 +798,15 @@ Co-authored-by: Claude <noreply@anthropic.com>"
 
 ---
 
-### Task 10: Deprecation warning for legacy flat storage-layout keys
+### Task 10: Deprecation warning for legacy flat storage-layout keys — DEFERRED
+
+**DEFERRED to a separate follow-up PR (not implemented in this branch).** A trial
+implementation turned ~296 existing tests red because setting `chunks`/`compressors`
+via `encoding=` is ubiquitous and the suite treats the warning as an error.
+Deprecating the common flat keys needs its own scoped PR (decide which keys to
+deprecate, and reconcile the test suite). This branch adds `zarr_array_metadata`
+as the preferred path without deprecating anything. The original task text is
+retained below for that future PR.
 
 Emit a `DeprecationWarning` when a user explicitly sets a flat storage-layout key (`chunks`, `compressor`, `compressors`, `filters`, `serializer`, `shards`, `fill_value`) via the `to_zarr(encoding=...)` argument, pointing them at `zarr_array_metadata`. Only warn for user-supplied encoding (the `check_encoding_set` variables), not for round-tripped `.encoding`.
 
@@ -927,7 +935,7 @@ Expected: no new errors in `xarray/backends/zarr_array_metadata.py` or `zarr.py`
 
 - [ ] **Step 4: Document the encoding key**
 
-Add a short subsection to the zarr I/O docs describing `encoding["zarr_array_metadata"]`: what it holds, that it is the preferred way to control zarr storage layout, that flat keys are deprecated aliases, and that it enables v2⇄v3 conversion.
+Add a short subsection to the zarr I/O docs describing `encoding["zarr_array_metadata"]`: what it holds, that it is the preferred way to control zarr storage layout, that the flat keys (`chunks`, `compressors`, …) remain fully supported as aliases (no deprecation in this PR), and that it enables v2⇄v3 conversion.
 
 - [ ] **Step 5: Commit**
 

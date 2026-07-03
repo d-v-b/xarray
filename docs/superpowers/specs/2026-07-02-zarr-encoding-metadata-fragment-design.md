@@ -53,10 +53,13 @@ during a deprecation period.
    canonical metadata dict; if a flat key and the corresponding fragment field
    disagree, raise `ValueError` naming the field. Flat keys with no fragment
    counterpart fold in.
-4. **Read populates both; deprecate flat later.** Read sets both the fragment and
-   the derived flat aliases so existing code keeps working. Setting a flat
-   storage-layout key emits a `DeprecationWarning`; hard removal is a separate,
-   later change (out of scope).
+4. **Read populates both; flat keys stay fully supported for now.** Read sets
+   both the fragment and the derived flat aliases so existing code keeps working.
+   Emitting a `DeprecationWarning` on flat-key use is DEFERRED to a separate
+   follow-up PR (in trial it turned ~296 existing tests red, since setting
+   `chunks`/`compressors` is ubiquitous — deprecating the common keys needs its
+   own careful scoping). Hard removal is a later change beyond that. This PR adds
+   the fragment as the preferred path without deprecating anything.
 5. **Read via `to_dict`; create by persisting metadata buffers.** Read uses
    `zarr_array.metadata.to_dict()`. Write builds
    `ArrayV{2,3}Metadata.from_dict(canonical_dict)` and persists its
@@ -152,9 +155,9 @@ touches.
 ## Back-compat & deprecation
 
 - Read continues to emit the flat keys (derived from the fragment).
-- Users may still set flat keys; doing so for a storage-layout key emits a
-  `DeprecationWarning` pointing at `zarr_array_metadata`.
-- Removal of the flat keys is explicitly out of scope for this change.
+- Users may still set flat keys; they remain fully supported in this PR (no
+  warning). Emitting a `DeprecationWarning` is deferred to a follow-up PR
+  (see decision 4), and hard removal is later still.
 
 ## Testing
 
@@ -162,7 +165,7 @@ touches.
 - Fragment/alias conflict raises; alias-only and fragment-only inputs both work.
 - Variable-owned fields always win over stale fragment fields.
 - `fill_value` matrix across formats and `use_zarr_fill_value_as_mask`.
-- `DeprecationWarning` fires when a flat storage-layout key is set.
+- (Deferred to follow-up PR) `DeprecationWarning` on flat-key use.
 
 ## Open implementation questions (resolve in the plan)
 
