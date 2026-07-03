@@ -4582,6 +4582,24 @@ def test_zarr_version_deprecated() -> None:
         xr.open_zarr(store=store, zarr_version=2, zarr_format=3)
 
 
+@requires_zarr
+def test_v2_to_v3_roundtrip_with_compression(tmp_path) -> None:
+    from xarray.backends.zarr import _zarr_v3
+
+    if not _zarr_v3():
+        pytest.skip("requires zarr-python 3")
+
+    ds = xr.Dataset({"a": ("x", np.arange(10.0))}).chunk({"x": 5})
+    ds.to_zarr(tmp_path / "v2.zarr", zarr_format=2, mode="w")
+    opened = xr.open_zarr(tmp_path / "v2.zarr")
+
+    # Previously raised: TypeError: Expected a BytesBytesCodec ...
+    opened.to_zarr(tmp_path / "v3.zarr", zarr_format=3, mode="w")
+
+    back = xr.open_zarr(tmp_path / "v3.zarr")
+    assert_identical(back.compute(), ds.compute())
+
+
 @requires_scipy
 class TestScipyInMemoryData(CFEncodedBase, NetCDF3Only, InMemoryNetCDF):
     engine: T_NetcdfEngine = "scipy"
