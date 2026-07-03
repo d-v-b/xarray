@@ -4629,6 +4629,32 @@ def test_v2_to_v3_roundtrip_write_empty_chunks(tmp_path) -> None:
 
 
 @requires_zarr
+def test_v2_to_v3_roundtrip_order_encoding(tmp_path) -> None:
+    """Regression test: a variable whose ``encoding["order"]`` is set must
+    not silently take the metadata-fragment fast path in
+    ``_create_new_array``, since ``order`` is runtime array config (like
+    ``write_empty_chunks``) applied via ``create(config=...)`` on the legacy
+    path, not part of the spec metadata document ``persist_array`` writes.
+    """
+    from xarray.backends.zarr import _zarr_v3
+
+    if not _zarr_v3():
+        pytest.skip("requires zarr-python 3")
+
+    ds = xr.Dataset({"a": ("x", np.arange(10.0))}).chunk({"x": 5})
+    ds.to_zarr(tmp_path / "v3.zarr", zarr_format=3, mode="w")
+
+    opened = xr.open_zarr(tmp_path / "v3.zarr")
+    opened["a"].encoding["order"] = "F"
+
+    # Must not raise, and must not silently drop/mis-handle the setting.
+    opened.to_zarr(tmp_path / "v3_rewrite.zarr", zarr_format=3, mode="w")
+
+    back = xr.open_zarr(tmp_path / "v3_rewrite.zarr")
+    assert_identical(back.compute(), ds.compute())
+
+
+@requires_zarr
 def test_v2_to_v3_roundtrip_fill_value_not_stale(tmp_path) -> None:
     """Regression test: the fragment fast path in ``_create_new_array`` must
     not persist the metadata fragment's own (stale) ``fill_value`` -- it must
@@ -4690,6 +4716,88 @@ def test_v2_to_v3_roundtrip_fill_value_nan_default(tmp_path) -> None:
 
     za = zarr.open_array(p3, path="a", mode="r")
     assert np.isnan(za.fill_value)
+
+
+@requires_zarr
+def test_v2_to_v3_roundtrip_fast_path_honors_write_dtype(tmp_path) -> None:
+    """Regression test: the fragment fast path in ``_create_new_array`` must
+    stamp the dtype actually being written (e.g. the packed ``int16`` of a
+    CF ``scale_factor``/``add_offset`` encoding) over the fragment's own,
+    possibly-stale dtype (e.g. ``float64`` from the unpacked source array).
+    Before the fix, the fast path persisted the fragment's stale dtype while
+    the writer streamed data encoded to the *new* dtype, corrupting the file.
+    """
+    from xarray.backends.zarr import _zarr_v3
+
+    if not _zarr_v3():
+        pytest.skip("requires zarr-python 3")
+
+    import zarr
+
+    p_src = tmp_path / "src.zarr"
+    p_dst = tmp_path / "dst.zarr"
+
+    values = np.array([1.1, 2.2, 3.3, 4.4, 5.5], dtype="float64")
+    ds = xr.Dataset({"a": ("x", values)}).chunk({"x": 5})
+    ds.to_zarr(p_src, zarr_format=3, mode="w")
+
+    opened = xr.open_zarr(p_src, mask_and_scale=False)
+    assert opened["a"].dtype == np.dtype("float64")
+    opened["a"].encoding.pop("fill_value", None)
+    # A plain `_FillValue` attribute (not an `encoding` key) just silences the
+    # "no _FillValue to use for NaNs" packing warning here; it plays no part
+    # in the dtype-stamping bug under test.
+    opened["a"].attrs["_FillValue"] = -1
+    opened["a"].encoding.update(
+        {"scale_factor": 0.1, "add_offset": 0.0, "dtype": "int16"}
+    )
+    opened.to_zarr(p_dst, zarr_format=3, mode="w")
+
+    za = zarr.open_array(p_dst, path="a", mode="r")
+    assert za.dtype == np.dtype("int16")
+
+    back = xr.open_zarr(p_dst)
+    np.testing.assert_allclose(back["a"].values, values, atol=0.05)
+
+
+@requires_zarr
+def test_v3_to_v2_roundtrip_fast_path(tmp_path) -> None:
+    """All other fast-path regression tests target a v3 *destination*; this
+    one exercises the opposite direction (v3 source, v2-target write), which
+    goes through ``_convert_v3_to_v2``, the v2 chunk branch of
+    ``_set_chunk_shape``, and the v2 ``fill_value is None`` passthrough in
+    ``_set_fill_value``.
+    """
+    from xarray.backends.zarr import _zarr_v3
+
+    if not _zarr_v3():
+        pytest.skip("requires zarr-python 3")
+
+    import zarr
+
+    p_src = tmp_path / "src.zarr"
+    p_dst = tmp_path / "dst.zarr"
+
+    values = np.arange(20.0)
+    ds = xr.Dataset({"a": ("x", values)}).chunk({"x": 6})
+    ds.to_zarr(
+        p_src,
+        zarr_format=3,
+        mode="w",
+        encoding={"a": {"compressors": zarr.codecs.GzipCodec(level=3)}},
+    )
+
+    opened = xr.open_zarr(p_src)
+    opened.to_zarr(p_dst, zarr_format=2, mode="w")
+
+    back = xr.open_zarr(p_dst)
+    assert_identical(back.compute(), ds.compute())
+
+    za = zarr.open_array(p_dst, path="a", mode="r")
+    assert za.metadata.zarr_format == 2
+    assert za.chunks == (6,)
+    assert za.compressors[0].codec_id == "gzip"
+    assert za.compressors[0].level == 3
 
 
 @requires_scipy

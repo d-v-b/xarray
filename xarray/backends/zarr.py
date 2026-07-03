@@ -1250,6 +1250,7 @@ class ZarrStore(AbstractWritableDataStore):
             and isinstance(resolved_chunks, tuple)
             and not encoding.get("shards")
             and not encoding.get("write_empty_chunks")
+            and not encoding.get("order")
         ):
             # Fast path: the variable already carries a spec-level metadata
             # fragment (e.g. round-tripped from an existing zarr array), and
@@ -1266,6 +1267,11 @@ class ZarrStore(AbstractWritableDataStore):
             #    the array's runtime `config`, which `persist_array` (a pure
             #    metadata-document write) does not handle. Rather than lose
             #    that setting, we defer to `zarr_group.create()` in that case.
+            #  - the variable's encoding carries `order`: like
+            #    `write_empty_chunks`, this is runtime array config (not part
+            #    of the spec metadata document) that the legacy path applies
+            #    via `create(config={"order": ...})`; `persist_array` has no
+            #    way to honor it, so we defer to `zarr_group.create()`.
             #  - chunks aren't a concrete tuple yet (e.g. `encoding["chunks"]`
             #    is the sentinel string "auto"): the fragment path needs an
             #    explicit chunk grid to write into the metadata document.
@@ -1318,6 +1324,17 @@ class ZarrStore(AbstractWritableDataStore):
             # discard this fragment's already-converted codecs/compressor and
             # reintroduce the v2->v3 compressor-translation problem the fast
             # path exists to avoid.
+            #
+            # `dtype` (the parameter this method receives) is, likewise, the
+            # dtype the write actually encodes to -- e.g. `int16` for a
+            # CF-packed `scale_factor`/`add_offset` variable being written
+            # from an unpacked-float64 fragment. `build_canonical_metadata`
+            # stamps it over the fragment's own (possibly stale) dtype field
+            # before resolving the fill-value default, so the fast path
+            # matches what `zarr_group.create(dtype=dtype)` would have
+            # written on the legacy path instead of silently persisting an
+            # array whose on-disk dtype disagrees with the data being
+            # streamed into it.
             merge_encoding = {k: v for k, v in encoding.items() if k != "chunks"}
             canonical = build_canonical_metadata(
                 merge_encoding,
@@ -1326,6 +1343,7 @@ class ZarrStore(AbstractWritableDataStore):
                 target_format=target_format,
                 resolved_chunks=resolved_chunks,
                 resolved_fill_value=fill_value,
+                resolved_dtype=dtype,
             )
             store_path = self.zarr_group.store_path / name
             persist_array(store_path, canonical)

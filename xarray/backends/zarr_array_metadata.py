@@ -11,6 +11,8 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from typing import TYPE_CHECKING, Literal, cast
 
+import numpy as np
+
 if TYPE_CHECKING:
     from zarr.storage import StorePath
     from zarr_metadata import ArrayMetadataV2, ArrayMetadataV3
@@ -323,6 +325,58 @@ def _set_chunk_shape(fragment: dict[str, object], chunks: tuple[int, ...]) -> No
         fragment["chunks"] = tuple(chunks)
 
 
+#: ``numpy`` dtype ``.kind`` codes for which the write ``dtype`` argument
+#: unambiguously determines a single zarr dtype, so ``_set_dtype`` can safely
+#: stamp it into the fragment. Excludes object/string/bytes/unicode kinds
+#: (``O``, ``U``, ``S``, ``T``): those cover vlen-string and other
+#: object-backed encodings where ``zarr.dtype.parse_dtype`` either raises
+#: (bare ``object``, verified empirically) or where the fragment's existing,
+#: already-correct dtype/codec pairing (e.g. a vlen-utf8 codec) must not be
+#: second-guessed from the numpy dtype alone.
+_CONCRETE_DTYPE_KINDS = frozenset({"b", "i", "u", "f", "c", "M", "m"})
+
+
+def _set_dtype(
+    fragment: dict[str, object],
+    dtype: object,
+    *,
+    zarr_format: Literal[2, 3],
+) -> None:
+    """Overwrite the fragment's dtype field with the write ``dtype``.
+
+    ``dtype`` here is the ``dtype`` argument ``_create_new_array`` receives,
+    i.e. the dtype the write actually encodes to (e.g. ``int16`` for a
+    CF-packed ``scale_factor``/``add_offset`` variable) -- not the fragment's
+    own ``data_type``/``dtype`` field, which reflects whatever the *source*
+    array had and can disagree (e.g. an unpacked float64 array's fragment,
+    reused to write packed int16 data). Left unfixed, the fast path would
+    persist a fragment whose on-disk dtype disagrees with the dtype the
+    writer actually streams into the array.
+
+    Only stamped for concrete numpy numeric/bool/datetime/timedelta dtypes
+    (see ``_CONCRETE_DTYPE_KINDS``): for those, ``zarr.dtype.parse_dtype``
+    unambiguously resolves a single zarr dtype from the numpy dtype alone.
+    Object-backed dtypes (vlen strings, etc.) are left untouched -- verified
+    empirically that ``parse_dtype`` raises ``ValueError`` on a bare
+    ``object`` dtype ("ambiguous... multiple zarr data types can be
+    represented by the numpy Object data type"), and more generally the
+    fragment's existing dtype/codec pairing for those encodings must not be
+    second-guessed from the numpy dtype alone.
+    """
+    np_dtype = np.dtype(dtype)  # type: ignore[call-overload]
+    if np_dtype.kind not in _CONCRETE_DTYPE_KINDS:
+        return
+
+    from zarr.dtype import parse_dtype
+
+    zdtype = parse_dtype(np_dtype, zarr_format=zarr_format)
+    target_json: object = zdtype.to_json(zarr_format=zarr_format)
+    if zarr_format == 2 and isinstance(target_json, Mapping):
+        target_json = target_json["name"]
+    dtype_field = "data_type" if zarr_format == 3 else "dtype"
+    fragment[dtype_field] = target_json
+
+
 def _set_fill_value(
     fragment: dict[str, object],
     fill_value: object,
@@ -390,6 +444,7 @@ def build_canonical_metadata(
     target_format: Literal[2, 3],
     resolved_chunks: tuple[int, ...],
     resolved_fill_value: object,
+    resolved_dtype: object,
 ) -> ZarrArrayMetadata:
     """Produce the canonical, target-format metadata dict for a write."""
     raw_fragment = encoding["zarr_array_metadata"]
@@ -405,6 +460,11 @@ def build_canonical_metadata(
     fragment = apply_variable_fields(fragment, shape=shape, dims=dims)
     mutable_fragment: dict[str, object] = dict(fragment)
     _set_chunk_shape(mutable_fragment, resolved_chunks)
+    # Must run before `_set_fill_value`: the fill-value default resolution
+    # (the `fill_value is None` branch, e.g. `0` for ints/`False` for bool)
+    # reads the fragment's own dtype field, so it needs to already be the
+    # write dtype rather than the fragment's stale one.
+    _set_dtype(mutable_fragment, resolved_dtype, zarr_format=target_format)
     _set_fill_value(mutable_fragment, resolved_fill_value, zarr_format=target_format)
     return cast("ZarrArrayMetadata", mutable_fragment)
 

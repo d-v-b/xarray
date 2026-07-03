@@ -1,3 +1,4 @@
+import numpy as np
 import pytest
 
 from xarray.tests import requires_zarr
@@ -255,9 +256,11 @@ def test_build_canonical_metadata_v3(tmp_path):
         target_format=3,
         resolved_chunks=(4,),
         resolved_fill_value=0.0,
+        resolved_dtype=np.dtype("f8"),
     )
     assert out["zarr_format"] == 3
     assert out["shape"] == (8,)
     assert out["dimension_names"] == ("x",)
     assert tuple(out["chunk_grid"]["configuration"]["chunk_shape"]) == (4,)
     assert out["fill_value"] == 0.0
+    assert out["data_type"] == "float64"
