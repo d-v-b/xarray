@@ -15,7 +15,8 @@ def test_read_metadata_fragment_v3(tmp_path):
 
     frag = read_metadata_fragment(a)
     assert frag["zarr_format"] == 3
-    assert frag["shape"] == (10,) or frag["shape"] == [10]
+    assert frag["shape"] == (10,)
+    assert isinstance(frag["shape"], tuple)
     assert "codecs" in frag
 
 
@@ -211,6 +212,129 @@ def test_convert_metadata_v2_to_v3_raises_for_unmapped_filter(tmp_path):
 
     with pytest.raises(NotImplementedError, match="delta"):
         convert_zarr_metadata(v2, 3)
+
+
+@requires_zarr
+def test_convert_metadata_v2_to_v3_raises_for_fortran_order(tmp_path):
+    import zarr
+
+    from xarray.backends.zarr_array_metadata import (
+        convert_zarr_metadata,
+        read_metadata_fragment,
+    )
+
+    g = zarr.open_group(tmp_path / "v2.zarr", mode="w", zarr_format=2)
+    a = g.create_array(
+        "a", shape=(4, 4), chunks=(2, 2), dtype="f8", order="F", compressors=None
+    )
+    v2 = read_metadata_fragment(a)
+    assert v2["order"] == "F"
+
+    with pytest.raises(NotImplementedError, match="order"):
+        convert_zarr_metadata(v2, 3)
+
+
+@requires_zarr
+def test_convert_metadata_v3_to_v2_raises_for_transpose_codec():
+    from xarray.backends.zarr_array_metadata import convert_zarr_metadata
+
+    v3 = {
+        "zarr_format": 3,
+        "node_type": "array",
+        "shape": (4, 4),
+        "data_type": "float64",
+        "chunk_grid": {
+            "name": "regular",
+            "configuration": {"chunk_shape": (2, 2)},
+        },
+        "chunk_key_encoding": {
+            "name": "default",
+            "configuration": {"separator": "/"},
+        },
+        "codecs": (
+            {"name": "transpose", "configuration": {"order": (1, 0)}},
+            {"name": "bytes", "configuration": {"endian": "little"}},
+        ),
+        "fill_value": 0.0,
+        "attributes": {},
+        "storage_transformers": (),
+    }
+
+    with pytest.raises(NotImplementedError, match="transpose"):
+        convert_zarr_metadata(v3, 2)
+
+
+@requires_zarr
+def test_convert_metadata_v2_to_v3_preserves_big_endian(tmp_path):
+    import zarr
+
+    from xarray.backends.zarr_array_metadata import (
+        convert_zarr_metadata,
+        read_metadata_fragment,
+    )
+
+    g = zarr.open_group(tmp_path / "v2.zarr", mode="w", zarr_format=2)
+    a = g.create_array("a", shape=(4,), chunks=(2,), dtype=">f8", compressors=None)
+    v2 = read_metadata_fragment(a)
+    assert v2["dtype"] == ">f8"
+
+    v3 = convert_zarr_metadata(v2, 3)
+    bytes_codec = next(c for c in v3["codecs"] if c["name"] == "bytes")
+    assert bytes_codec["configuration"]["endian"] == "big"
+
+
+@requires_zarr
+def test_convert_metadata_v3_to_v2_preserves_big_endian():
+    from xarray.backends.zarr_array_metadata import convert_zarr_metadata
+
+    v3 = {
+        "zarr_format": 3,
+        "node_type": "array",
+        "shape": (4,),
+        "data_type": "float64",
+        "chunk_grid": {
+            "name": "regular",
+            "configuration": {"chunk_shape": (2,)},
+        },
+        "chunk_key_encoding": {
+            "name": "default",
+            "configuration": {"separator": "/"},
+        },
+        "codecs": ({"name": "bytes", "configuration": {"endian": "big"}},),
+        "fill_value": 0.0,
+        "attributes": {},
+        "storage_transformers": (),
+    }
+
+    v2 = convert_zarr_metadata(v3, 2)
+    assert v2["dtype"] == ">f8"
+
+
+@requires_zarr
+def test_convert_metadata_v3_to_v2_raises_for_vlen_utf8_serializer():
+    from xarray.backends.zarr_array_metadata import convert_zarr_metadata
+
+    v3 = {
+        "zarr_format": 3,
+        "node_type": "array",
+        "shape": (4,),
+        "data_type": "string",
+        "chunk_grid": {
+            "name": "regular",
+            "configuration": {"chunk_shape": (2,)},
+        },
+        "chunk_key_encoding": {
+            "name": "default",
+            "configuration": {"separator": "/"},
+        },
+        "codecs": ({"name": "vlen-utf8", "configuration": {}},),
+        "fill_value": "",
+        "attributes": {},
+        "storage_transformers": (),
+    }
+
+    with pytest.raises(NotImplementedError, match="vlen-utf8"):
+        convert_zarr_metadata(v3, 2)
 
 
 @requires_zarr

@@ -1158,6 +1158,13 @@ remain fully supported as convenient aliases for the pieces of metadata they
 each cover, and both forms may be combined as long as they do not disagree.
 The flat keys are not deprecated.
 
+The v2⇄v3 conversion only handles common arrays (standard numeric dtypes,
+C memory order, and a handful of well-known compressors); for layouts it
+cannot faithfully convert (e.g. non-C memory order, non-little-endian data,
+or string/vlen data) it raises a clear ``NotImplementedError`` naming the
+unsupported field rather than silently corrupting it -- write those arrays
+via the flat encoding keys instead.
+
 .. _io.zarr.appending:
 
 Modifying existing Zarr stores

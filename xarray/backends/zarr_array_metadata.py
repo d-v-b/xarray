@@ -8,6 +8,7 @@ backend call sites.
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Iterable, Mapping
 from typing import TYPE_CHECKING, Literal, cast
 
@@ -191,18 +192,40 @@ def _v3_codec_to_v2_compressor(codec: Mapping[str, object]) -> dict[str, object]
     return {"id": "zstd", "level": config.get("level", 0)}
 
 
-def _convert_dtype(dtype_str: object, *, target_format: Literal[2, 3]) -> object:
+def _convert_dtype(
+    dtype_str: object,
+    *,
+    target_format: Literal[2, 3],
+    endian: Literal["little", "big"] | None = None,
+) -> object:
     """Round-trip a dtype string/name through ``zarr.dtype`` for the target format.
 
     Mirrors ``ArrayV2Metadata.to_dict``/``ArrayV3Metadata.to_dict``: the v2
     ``dtype`` field is the bare ``"name"`` pulled out of the dtype's v2 JSON
     spec, while the v3 ``data_type`` field is the dtype's v3 JSON spec
     (itself already a bare string for non-structured dtypes).
+
+    ``endian``, when given (only meaningful for ``target_format=2``), is
+    stamped onto the parsed dtype before serializing to v2. This is needed
+    because a v3 ``data_type`` string carries no byte-order information --
+    it is always parsed back as native/little by ``parse_dtype`` -- while the
+    real byte order for a v3 array lives in the ``bytes`` codec's ``endian``
+    field (verified empirically: ``parse_dtype("float64", zarr_format=3)``
+    always yields ``endianness='little'`` regardless of how the array was
+    actually written). Dtypes with no byte-order concept (e.g. single-byte
+    ints, bool) have no ``endianness`` attribute at all, so this is a no-op
+    for them.
     """
     from zarr.dtype import parse_dtype
 
     source_format: Literal[2, 3] = 3 if target_format == 2 else 2
     zdtype = parse_dtype(dtype_str, zarr_format=source_format)  # type: ignore[arg-type]
+    if endian is not None and hasattr(zdtype, "endianness"):
+        # `ZDType.replace`'s signature is `**changes: object`, so mypy cannot
+        # verify `endianness` is a valid field for this particular dtype
+        # subclass; verified empirically (see docstring) that it is, for
+        # every dtype where `hasattr(zdtype, "endianness")` holds.
+        zdtype = dataclasses.replace(zdtype, endianness=endian)  # type: ignore[call-arg]
     target_json = zdtype.to_json(zarr_format=target_format)
     if target_format == 2 and isinstance(target_json, Mapping):
         return target_json["name"]
@@ -237,6 +260,21 @@ def convert_zarr_metadata(
     return cast("ZarrArrayMetadata", _convert_v3_to_v2(fragment))
 
 
+def _v2_dtype_endian(dtype_str: object) -> Literal["little", "big"]:
+    """Derive the v3 bytes-codec ``endian`` value from a v2 ``dtype`` string.
+
+    Mirrors ``numpy.dtype(...).byteorder``: ``"<"`` -> little, ``">"`` -> big,
+    ``"="`` -> native (treated as little, matching the little-endian default
+    this converter already hardcoded), ``"|"`` -> not-applicable (single-byte
+    dtypes have no byte order; little is an arbitrary but harmless choice
+    since the bytes codec's endian is a no-op for them).
+    """
+    byteorder = np.dtype(dtype_str).byteorder  # type: ignore[call-overload]
+    if byteorder == ">":
+        return "big"
+    return "little"
+
+
 def _convert_v2_to_v3(fragment: Mapping[str, object]) -> dict[str, object]:
     filters = fragment.get("filters")
     if filters:
@@ -245,9 +283,18 @@ def _convert_v2_to_v3(fragment: Mapping[str, object]) -> dict[str, object]:
             "are not supported by convert_zarr_metadata)"
         )
 
+    order = fragment.get("order", "C")
+    if order is not None and order != "C":
+        raise NotImplementedError(
+            f"cannot convert zarr v2 array with order={order!r} to v3: "
+            "non-C memory order is not supported by the metadata-fragment "
+            "converter (write via the flat encoding path instead)"
+        )
+
     chunks = fragment.get("chunks")
+    endian = _v2_dtype_endian(fragment.get("dtype"))
     codecs: list[dict[str, object]] = [
-        {"name": "bytes", "configuration": {"endian": "little"}}
+        {"name": "bytes", "configuration": {"endian": endian}}
     ]
     compressor = fragment.get("compressor")
     if isinstance(compressor, Mapping):
@@ -275,17 +322,45 @@ def _convert_v2_to_v3(fragment: Mapping[str, object]) -> dict[str, object]:
     }
 
 
+#: v3 array-to-bytes *serializer* codec names other than the plain ``bytes``
+#: codec. These encode variable-length data (strings/bytes) with no v2
+#: equivalent understood by this converter; they must never be misrouted
+#: into the compressor-detection loop below (verified empirically: a v3
+#: string array serializes with codecs ``({"name": "vlen-utf8", ...},)`` and
+#: *no* ``bytes`` codec at all, and a v3 bytes/vlen array uses
+#: ``vlen-bytes``).
+_V3_VLEN_SERIALIZER_NAMES = frozenset({"vlen-utf8", "vlen-bytes"})
+
+
 def _convert_v3_to_v2(fragment: Mapping[str, object]) -> dict[str, object]:
     codecs = fragment.get("codecs")
     codecs = list(codecs) if isinstance(codecs, (list, tuple)) else []
 
     compressor: dict[str, object] | None = None
+    endian: Literal["little", "big"] = "little"
     for codec in codecs:
         if not isinstance(codec, Mapping):
             continue
         name = codec.get("name")
         if name == "bytes":
+            config = codec.get("configuration")
+            if isinstance(config, Mapping) and config.get("endian") == "big":
+                endian = "big"
             continue
+        if name == "transpose":
+            raise NotImplementedError(
+                "cannot convert zarr v3 array using a 'transpose' codec to "
+                "v2: non-C memory order is not supported by the "
+                "metadata-fragment converter (write via the flat encoding "
+                "path instead)"
+            )
+        if name in _V3_VLEN_SERIALIZER_NAMES:
+            raise NotImplementedError(
+                f"cannot convert zarr v3 array using the {name!r} serializer "
+                "to v2: string/vlen conversion is not supported by the "
+                "metadata-fragment converter (write via the flat encoding "
+                "path instead)"
+            )
         compressor = _v3_codec_to_v2_compressor(codec)
 
     chunk_grid = fragment.get("chunk_grid")
@@ -308,10 +383,14 @@ def _convert_v3_to_v2(fragment: Mapping[str, object]) -> dict[str, object]:
         "zarr_format": 2,
         "shape": tuple(fragment["shape"]),  # type: ignore[arg-type]
         "chunks": tuple(chunk_shape) if chunk_shape is not None else None,  # type: ignore[arg-type]
-        "dtype": _convert_dtype(fragment.get("data_type"), target_format=2),
+        "dtype": _convert_dtype(
+            fragment.get("data_type"), target_format=2, endian=endian
+        ),
         "compressor": compressor,
         "filters": None,
         "fill_value": fragment.get("fill_value"),
+        # Safe to hardcode: any 'transpose' codec (the only source of
+        # non-C order in v3) is caught and raises above.
         "order": "C",
         "dimension_separator": separator,
         "attributes": dict(fragment.get("attributes") or {}),  # type: ignore[call-overload]
