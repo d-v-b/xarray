@@ -1300,9 +1300,29 @@ class ZarrStore(AbstractWritableDataStore):
             # `merge_flat_aliases`'s conflict check would raise even though
             # that outcome is immediately discarded by `_set_chunk_shape`.
             # Drop `chunks` from the encoding we merge so that check can only
-            # ever fire on a genuine, unresolvable conflict (e.g. `fill_value`
-            # below); `resolved_chunks` remains the sole source of truth for
-            # the chunk grid actually written.
+            # ever fire on a genuine, unresolvable conflict; `resolved_chunks`
+            # remains the sole source of truth for the chunk grid actually
+            # written.
+            #
+            # `fill_value` (the parameter this method receives, computed by
+            # `set_variables`: float default -> NaN, `_FillValue`-attr driven,
+            # `use_zarr_fill_value_as_mask` handling, etc.) is likewise always
+            # the authoritative value to write -- the fragment's own
+            # `fill_value` field reflects whatever the *source* array had,
+            # which can be stale (e.g. the user dropped the `_FillValue`
+            # attribute after opening). `build_canonical_metadata` overwrites
+            # the fragment's `fill_value` with `fill_value` unconditionally,
+            # the same way it does for `resolved_chunks`, so the fast path
+            # matches what `zarr_group.create(fill_value=fill_value)` would
+            # have written on the legacy path. When `fill_value` is `None`
+            # ("let zarr choose its own dtype-aware default", e.g. 0 for ints,
+            # False for bool), `_set_fill_value` (in `zarr_array_metadata.py`)
+            # resolves the same default zarr-python's `create()` would have
+            # picked, via `dtype.default_scalar()`, rather than falling
+            # through to the legacy path -- falling through here would
+            # discard this fragment's already-converted codecs/compressor and
+            # reintroduce the v2->v3 compressor-translation problem the fast
+            # path exists to avoid.
             merge_encoding = {k: v for k, v in encoding.items() if k != "chunks"}
             canonical = build_canonical_metadata(
                 merge_encoding,
@@ -1310,6 +1330,7 @@ class ZarrStore(AbstractWritableDataStore):
                 dims=dims,
                 target_format=target_format,
                 resolved_chunks=resolved_chunks,
+                resolved_fill_value=fill_value,
             )
             store_path = self.zarr_group.store_path / name
             persist_array(store_path, canonical)

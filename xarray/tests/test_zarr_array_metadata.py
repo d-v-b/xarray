@@ -249,9 +249,15 @@ def test_build_canonical_metadata_v3(tmp_path):
     encoding = {"zarr_array_metadata": read_metadata_fragment(a)}
 
     out = build_canonical_metadata(
-        encoding, shape=(8,), dims=("x",), target_format=3, resolved_chunks=(4,)
+        encoding,
+        shape=(8,),
+        dims=("x",),
+        target_format=3,
+        resolved_chunks=(4,),
+        resolved_fill_value=0.0,
     )
     assert out["zarr_format"] == 3
     assert out["shape"] == (8,)
     assert out["dimension_names"] == ("x",)
     assert tuple(out["chunk_grid"]["configuration"]["chunk_shape"]) == (4,)
+    assert out["fill_value"] == 0.0

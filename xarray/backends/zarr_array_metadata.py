@@ -304,6 +304,65 @@ def _set_chunk_shape(fragment: dict[str, object], chunks: tuple[int, ...]) -> No
         fragment["chunks"] = tuple(chunks)
 
 
+def _set_fill_value(
+    fragment: dict[str, object],
+    fill_value: object,
+    *,
+    zarr_format: Literal[2, 3],
+) -> None:
+    """Overwrite the fragment's ``fill_value`` with the resolved value.
+
+    ``fill_value`` here is the raw Python/numpy scalar computed by
+    ``set_variables`` (float default -> NaN, ``_FillValue``-attr driven,
+    ``use_zarr_fill_value_as_mask`` handling, etc.) -- the same value the
+    legacy path would hand to ``zarr_group.create()``. This function must
+    reproduce what ``zarr_group.create(fill_value=fill_value)`` would have
+    written for that same value, which (verified against zarr-python 3.2.1)
+    is format-dependent for the ``fill_value=None`` case:
+
+    - For a **v3** fragment, ``create_array(fill_value=None)`` resolves the
+      dtype's own default scalar (``0`` for ints, ``False`` for bool, ``0.0``
+      for floats) via ``dtype.default_scalar()`` and stores *that*, not a
+      null. We reproduce the same resolution here on the fragment's own
+      (already target-format) dtype field, rather than falling through to
+      the legacy path for this case -- falling through would also throw away
+      this fragment's already-converted codecs/compressor, reintroducing the
+      v2->v3 compressor-translation problem the fast path exists to avoid.
+    - For a **v2** fragment, ``create_array(fill_value=None)`` writes a
+      literal ``null``/``None`` -- *not* a dtype default. This is
+      semantically load-bearing: v2 is the format where
+      ``use_zarr_fill_value_as_mask`` defaults to ``True``, i.e. the on-disk
+      ``fill_value`` doubles as the "this value marks missing data" sentinel;
+      resolving it to e.g. ``0`` would make ``0``/``False`` entries decode as
+      missing on the next read. So for v2, ``None`` is passed through as-is.
+
+    Whichever scalar we end up with is then converted to the exact
+    JSON-shaped representation ``ArrayV{2,3}Metadata.from_dict`` expects for
+    the ``fill_value`` field -- verified against zarr-python 3.2.1:
+    ``from_dict`` parses this field with ``dtype.from_json_scalar``, which is
+    strict (e.g. it rejects a bare numpy scalar like ``np.int32(0)``,
+    requiring a plain Python ``int``, and represents float NaN as the string
+    ``"NaN"``). ``dtype.to_json_scalar`` is the exact inverse of that parsing
+    (it's what ``to_dict()`` itself uses to serialize ``fill_value``), so
+    routing non-``None`` values through it here guarantees the fragment
+    matches what a fresh ``to_dict()`` of an equivalently-created array would
+    contain. ``to_json_scalar`` itself has no sensible ``None`` input (there
+    is no dtype-compatible JSON form of "null"), so the v2 ``None`` case
+    bypasses it and is stored directly.
+    """
+    if fill_value is None and zarr_format != 3:
+        fragment["fill_value"] = None
+        return
+
+    from zarr.dtype import parse_dtype
+
+    dtype_field = "data_type" if zarr_format == 3 else "dtype"
+    zdtype = parse_dtype(fragment[dtype_field], zarr_format=zarr_format)  # type: ignore[arg-type]
+    if fill_value is None:
+        fill_value = zdtype.default_scalar()
+    fragment["fill_value"] = zdtype.to_json_scalar(fill_value, zarr_format=zarr_format)
+
+
 def build_canonical_metadata(
     encoding: Mapping[str, object],
     *,
@@ -311,6 +370,7 @@ def build_canonical_metadata(
     dims: tuple[str, ...],
     target_format: Literal[2, 3],
     resolved_chunks: tuple[int, ...],
+    resolved_fill_value: object,
 ) -> dict[str, object]:
     """Produce the canonical, target-format metadata dict for a write."""
     fragment = encoding["zarr_array_metadata"]
@@ -321,6 +381,7 @@ def build_canonical_metadata(
     fragment = convert_zarr_metadata(fragment, target_format)
     fragment = apply_variable_fields(fragment, shape=shape, dims=dims)
     _set_chunk_shape(fragment, resolved_chunks)
+    _set_fill_value(fragment, resolved_fill_value, zarr_format=target_format)
     return fragment
 
 

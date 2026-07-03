@@ -4600,6 +4600,70 @@ def test_v2_to_v3_roundtrip_with_compression(tmp_path) -> None:
     assert_identical(back.compute(), ds.compute())
 
 
+@requires_zarr
+def test_v2_to_v3_roundtrip_fill_value_not_stale(tmp_path) -> None:
+    """Regression test: the fragment fast path in ``_create_new_array`` must
+    not persist the metadata fragment's own (stale) ``fill_value`` -- it must
+    match whatever the legacy ``zarr_group.create(fill_value=...)`` path would
+    have written for the ``fill_value`` actually computed by ``set_variables``.
+    """
+    from xarray.backends.zarr import _zarr_v3
+
+    if not _zarr_v3():
+        pytest.skip("requires zarr-python 3")
+
+    import zarr
+
+    p2 = tmp_path / "v2.zarr"
+    p3 = tmp_path / "v3.zarr"
+
+    ds = xr.Dataset({"a": ("x", np.array([1, 2, 3, 4, 5], dtype="int32"))}).chunk(
+        {"x": 5}
+    )
+    ds.to_zarr(p2, zarr_format=2, mode="w", encoding={"a": {"_FillValue": -1}})
+
+    opened = xr.open_zarr(p2, mask_and_scale=False)
+    # The user removes the sentinel attribute, so no explicit fill_value is
+    # requested anymore; xarray must fall back to zarr's own default fill
+    # value for this dtype (0 for int32), not the stale fragment's -1.
+    opened["a"].attrs.pop("_FillValue", None)
+    opened.to_zarr(p3, zarr_format=3, mode="w")
+
+    za = zarr.open_array(p3, path="a", mode="r")
+    assert za.fill_value == 0
+
+
+@requires_zarr
+def test_v2_to_v3_roundtrip_fill_value_nan_default(tmp_path) -> None:
+    """Same fast-path bug, but for the float default-fill-value case: xarray
+    defaults floating point ``fill_value`` to NaN, and the fast path must
+    honor that instead of the stale fragment fill_value.
+    """
+    from xarray.backends.zarr import _zarr_v3
+
+    if not _zarr_v3():
+        pytest.skip("requires zarr-python 3")
+
+    import zarr
+
+    p2 = tmp_path / "v2.zarr"
+    p3 = tmp_path / "v3.zarr"
+
+    ds = xr.Dataset({"a": ("x", np.array([1.0, 2.0, 3.0], dtype="float64"))}).chunk(
+        {"x": 3}
+    )
+    # Give the source array a concrete (non-NaN) fill_value so the fragment
+    # read back from disk carries a stale value that must not leak through.
+    ds.to_zarr(p2, zarr_format=2, mode="w", encoding={"a": {"_FillValue": -9999.0}})
+
+    opened = xr.open_zarr(p2, mask_and_scale=False)
+    opened["a"].attrs.pop("_FillValue", None)
+    opened.to_zarr(p3, zarr_format=3, mode="w")
+
+    za = zarr.open_array(p3, path="a", mode="r")
+    assert np.isnan(za.fill_value)
+
+
 @requires_scipy
 class TestScipyInMemoryData(CFEncodedBase, NetCDF3Only, InMemoryNetCDF):
     engine: T_NetcdfEngine = "scipy"
