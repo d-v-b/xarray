@@ -259,7 +259,23 @@ def _fold_flat_codecs(
         elif existing_serializer is not None:
             new_serializer = existing_serializer
         else:
-            new_serializer = {"name": "bytes", "configuration": {"endian": "little"}}
+            # No serializer was supplied via `encoding`, and none of the
+            # fragment's existing codecs matched a recognized array->bytes
+            # serializer name (`bytes`/`vlen-utf8`/`vlen-bytes`). Every codec
+            # in `codecs` was therefore classified as a "filter" above --
+            # fabricating a little-endian `bytes` codec here would silently
+            # discard whatever the real (unrecognized) serializer was and
+            # hardcode an endianness that may not match the source array.
+            # Raise instead so the caller learns about the unsupported
+            # codec rather than getting silently corrupted metadata.
+            unrecognized = [c.get("name") for c in codecs]
+            raise NotImplementedError(
+                "could not identify a zarr v3 array->bytes serializer codec "
+                f"in the metadata fragment (codecs: {unrecognized!r}); none "
+                "of them match a recognized serializer name "
+                f"({sorted(serializer_names)!r}), and no explicit "
+                "encoding['serializer'] was supplied to disambiguate"
+            )
 
         if "compressors" in encoding:
             new_compressors = _as_codec_list(

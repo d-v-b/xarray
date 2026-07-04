@@ -1249,7 +1249,7 @@ class ZarrStore(AbstractWritableDataStore):
             and self._write_empty is None
             and isinstance(resolved_chunks, tuple)
             and not encoding.get("shards")
-            and not encoding.get("write_empty_chunks")
+            and "write_empty_chunks" not in encoding
             and not encoding.get("order")
         ):
             # Fast path: the variable already carries a spec-level metadata

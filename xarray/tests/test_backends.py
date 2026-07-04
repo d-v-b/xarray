@@ -54,6 +54,7 @@ from xarray.backends.netCDF4_ import (
 from xarray.backends.pydap_ import PydapDataStore
 from xarray.backends.scipy_ import ScipyBackendEntrypoint
 from xarray.backends.zarr import ZarrStore
+from xarray.backends.zarr_array_metadata import persist_array as _real_persist_array
 from xarray.coders import CFDatetimeCoder, CFTimedeltaCoder
 from xarray.coding.cftime_offsets import date_range
 from xarray.coding.strings import check_vlen_dtype, create_vlen_dtype
@@ -4665,6 +4666,11 @@ def test_v2_to_v3_roundtrip_write_empty_chunks(tmp_path) -> None:
     write and has no way to honor that runtime store-config setting. Such
     variables must fall through to the legacy ``zarr_group.create()`` path,
     which does honor it via ``create(config=...)``.
+
+    Spies on ``xarray.backends.zarr.persist_array`` (the name as imported and
+    called by ``_create_new_array``) to directly confirm which path ran,
+    rather than only checking observable data equality -- data equality holds
+    on both paths, so it can't discriminate between them.
     """
     from xarray.backends.zarr import _zarr_v3
 
@@ -4674,12 +4680,24 @@ def test_v2_to_v3_roundtrip_write_empty_chunks(tmp_path) -> None:
     ds = xr.Dataset({"a": ("x", np.arange(10.0))}).chunk({"x": 5})
     ds.to_zarr(tmp_path / "v3.zarr", zarr_format=3, mode="w")
 
+    # Sanity check: a variable with no write_empty_chunks/order/shards in its
+    # encoding *does* take the fast path. `wraps=` keeps the real write
+    # happening (so the subsequent open below succeeds) while still
+    # recording whether `persist_array` was invoked.
+    opened_plain = xr.open_zarr(tmp_path / "v3.zarr")
+    with patch("xarray.backends.zarr.persist_array", wraps=_real_persist_array) as m:
+        opened_plain.to_zarr(tmp_path / "v3_plain.zarr", zarr_format=3, mode="w")
+    assert m.called
+
     opened = xr.open_zarr(tmp_path / "v3.zarr")
     opened["a"].encoding["write_empty_chunks"] = False
 
-    # Must not raise, and must not silently drop/mis-handle the setting.
-    opened.to_zarr(tmp_path / "v3_rewrite.zarr", zarr_format=3, mode="w")
+    # Must not take the fragment fast path: persist_array must not be called.
+    with patch("xarray.backends.zarr.persist_array") as m:
+        opened.to_zarr(tmp_path / "v3_rewrite.zarr", zarr_format=3, mode="w")
+    assert not m.called
 
+    # Must not raise, and must not silently drop/mis-handle the setting.
     back = xr.open_zarr(tmp_path / "v3_rewrite.zarr")
     assert_identical(back.compute(), ds.compute())
 
@@ -4691,6 +4709,18 @@ def test_v2_to_v3_roundtrip_order_encoding(tmp_path) -> None:
     ``_create_new_array``, since ``order`` is runtime array config (like
     ``write_empty_chunks``) applied via ``create(config=...)`` on the legacy
     path, not part of the spec metadata document ``persist_array`` writes.
+
+    ``order`` is not currently a recognized Zarr encoding key
+    (``ZARR_ENCODING_KEYS`` in ``xarray/backends/zarr.py``), so
+    ``extract_zarr_variable_encoding`` always strips or rejects it before
+    ``_create_new_array`` would ever see it via the public ``to_zarr()`` API
+    -- there is no way to drive this guard clause end-to-end today. Call
+    ``_create_new_array`` directly instead, with an ``order`` key forced
+    into the encoding dict, to exercise the guard clause itself. Spies on
+    ``xarray.backends.zarr.persist_array`` (the name as imported and called
+    by ``_create_new_array``) to directly confirm which path ran, rather
+    than only checking observable data equality -- data equality holds on
+    both paths, so it can't discriminate between them.
     """
     from xarray.backends.zarr import _zarr_v3
 
@@ -4701,12 +4731,42 @@ def test_v2_to_v3_roundtrip_order_encoding(tmp_path) -> None:
     ds.to_zarr(tmp_path / "v3.zarr", zarr_format=3, mode="w")
 
     opened = xr.open_zarr(tmp_path / "v3.zarr")
-    opened["a"].encoding["order"] = "F"
+    encoding = dict(opened["a"].encoding)
+    # Strip the keys `set_variables` would normally have already consumed
+    # before calling `_create_new_array`, so the dict shape matches what the
+    # method actually receives.
+    encoding.pop("fill_value", None)
+    encoding.pop("_FillValue", None)
+    encoding.pop("preferred_chunks", None)
+    encoding.pop("dtype", None)
+    encoding["order"] = "F"
+
+    store = ZarrStore.open_group(str(tmp_path / "v3_rewrite.zarr"), mode="w")
+    try:
+        # Must not take the fragment fast path: persist_array must not be
+        # called.
+        with patch("xarray.backends.zarr.persist_array") as m:
+            zarr_array = store._create_new_array(
+                name="a",
+                dims=("x",),
+                shape=(10,),
+                dtype=np.dtype("float64"),
+                fill_value=np.nan,
+                encoding=encoding,
+                attrs={},
+            )
+        assert not m.called
+        # `_create_new_array` only creates the array; write the data that
+        # `set_variables`/the array writer would normally stream in.
+        zarr_array[:] = ds["a"].values
+    finally:
+        store.close()
 
     # Must not raise, and must not silently drop/mis-handle the setting.
-    opened.to_zarr(tmp_path / "v3_rewrite.zarr", zarr_format=3, mode="w")
-
-    back = xr.open_zarr(tmp_path / "v3_rewrite.zarr")
+    # `consolidated=False`: writing was done directly through
+    # `_create_new_array` above, bypassing the higher-level `to_zarr()` call
+    # that would normally consolidate metadata on close.
+    back = xr.open_zarr(tmp_path / "v3_rewrite.zarr", consolidated=False)
     assert_identical(back.compute(), ds.compute())
 
 

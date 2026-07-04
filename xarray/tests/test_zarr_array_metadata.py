@@ -388,3 +388,45 @@ def test_build_canonical_metadata_v3(tmp_path):
     assert tuple(out["chunk_grid"]["configuration"]["chunk_shape"]) == (4,)
     assert out["fill_value"] == 0.0
     assert out["data_type"] == "float64"
+
+
+@requires_zarr
+def test_build_canonical_metadata_raises_for_unrecognized_serializer(tmp_path):
+    """A v3 fragment whose array->bytes codec has an unrecognized ``name``
+    (and no ``encoding["serializer"]`` supplied to disambiguate) must raise
+    ``NotImplementedError`` rather than silently fabricating a little-endian
+    ``bytes`` codec in its place, which would drop the real serializer and
+    potentially write data with the wrong endianness.
+    """
+    import zarr
+
+    from xarray.backends.zarr_array_metadata import (
+        build_canonical_metadata,
+        read_metadata_fragment,
+    )
+
+    g = zarr.open_group(tmp_path / "g.zarr", mode="w", zarr_format=3)
+    a = g.create_array("a", shape=(10,), chunks=(5,), dtype="f8")
+    fragment = dict(read_metadata_fragment(a))
+
+    # Replace the real `bytes` serializer codec with one bearing an
+    # unrecognized name, simulating a fragment whose serializer this
+    # converter cannot identify.
+    codecs = [dict(c) for c in fragment["codecs"]]
+    for codec in codecs:
+        if codec.get("name") == "bytes":
+            codec["name"] = "not-a-real-serializer"
+    fragment["codecs"] = tuple(codecs)
+
+    encoding = {"zarr_array_metadata": fragment}
+
+    with pytest.raises(NotImplementedError, match="serializer"):
+        build_canonical_metadata(
+            encoding,
+            shape=(8,),
+            dims=("x",),
+            target_format=3,
+            resolved_chunks=(4,),
+            resolved_fill_value=0.0,
+            resolved_dtype=np.dtype("f8"),
+        )
