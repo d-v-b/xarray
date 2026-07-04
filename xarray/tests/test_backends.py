@@ -102,7 +102,6 @@ from xarray.tests import (
     requires_scipy,
     requires_scipy_or_netCDF4,
     requires_zarr,
-    requires_zarr_v3,
 )
 from xarray.tests.test_coding_times import (
     _ALL_CALENDARS,
@@ -3892,9 +3891,6 @@ class TestInstrumentedZarrStore:
 
     @contextlib.contextmanager
     def create_zarr_target(self):
-        if Version(zarr.__version__) < Version("2.18.0"):
-            pytest.skip("Instrumented tests only work on latest Zarr.")
-
         store = KVStore({}, read_only=False)  # type: ignore[arg-type,unused-ignore]
         yield store
 
@@ -4065,7 +4061,7 @@ class TestZarrDictStore(ZarrBase):
                 assert actual["var1"].encoding["chunks"] == (2, 2)
 
     @pytest.mark.asyncio
-    @requires_zarr_v3
+    @requires_zarr
     async def test_async_load_multiple_variables(self) -> None:
         target_class = zarr.AsyncArray
         method_name = "getitem"
@@ -4094,7 +4090,7 @@ class TestZarrDictStore(ZarrBase):
             xrt.assert_identical(result_ds, ds.load())
 
     @pytest.mark.asyncio
-    @requires_zarr_v3
+    @requires_zarr
     @pytest.mark.parametrize("cls_name", ["Variable", "DataArray", "Dataset"])
     async def test_concurrent_load_multiple_objects(
         self,
@@ -4132,7 +4128,7 @@ class TestZarrDictStore(ZarrBase):
                 xrt.assert_identical(result, xr_obj.load())
 
     @pytest.mark.asyncio
-    @requires_zarr_v3
+    @requires_zarr
     @pytest.mark.parametrize("cls_name", ["Variable", "DataArray", "Dataset"])
     @pytest.mark.parametrize(
         "indexer, method, target_zarr_class",
@@ -4236,13 +4232,6 @@ class TestZarrDictStore(ZarrBase):
         ("indexer", "expected_err_msg"),
         [
             pytest.param(
-                {"dim2": 2},
-                "basic async indexing",
-                marks=pytest.mark.skip(
-                    reason="current version of zarr has basic async indexing"
-                ),
-            ),  # tests basic indexing
-            pytest.param(
                 {"dim2": [1, 3]},
                 "orthogonal async indexing",
                 marks=pytest.mark.skipif(
@@ -4341,7 +4330,7 @@ class NoConsolidatedMetadataSupportStore(WrapperStore):
         )
 
 
-@requires_zarr_v3
+@requires_zarr
 class TestZarrNoConsolidatedMetadataSupport(ZarrBase):
     @contextlib.contextmanager
     def create_zarr_target(self):
