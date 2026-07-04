@@ -1,7 +1,14 @@
 # Design: represent zarr storage layout in `encoding` as a spec metadata fragment
 
 Date: 2026-07-02
-Status: approved (brainstorming), pending implementation plan
+Status: SUPERSEDED / DESCOPED (2026-07-04). The full read+write+convert design
+below was implemented and reviewed, but judged too much conversion burden for
+xarray to own. Walked back to a gradual first increment: **store** the source
+array's metadata document on read (`encoding["zarr_array_metadata"]`, a
+read-only key dropped on write) and do **not** read/consume it on write. v2⇄v3
+conversion is deferred to a future increment, ideally built on an improved
+upstream `zarr-python` converter (see the `_convert_array_metadata` follow-up).
+The design below is retained as the record of the fuller approach.
 Scope: xarray Zarr backend (`xarray/backends/zarr.py`)
 
 ## Problem

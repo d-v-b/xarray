@@ -87,7 +87,6 @@ dev = [
   "sphinx",
   "sphinx_autosummary_accessors",
   "xarray[complete,types]",
-  "zarr-metadata>=0.3.0",
 ]
 
 [project.urls]

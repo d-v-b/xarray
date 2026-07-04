@@ -24,12 +24,6 @@ from xarray.backends.common import (
     ensure_dtype_not_object,
 )
 from xarray.backends.store import StoreBackendEntrypoint
-from xarray.backends.zarr_array_metadata import (
-    build_canonical_metadata,
-    derive_flat_aliases,
-    persist_array,
-    read_metadata_fragment,
-)
 from xarray.core import indexing
 from xarray.core.treenode import NodePath
 from xarray.core.types import ZarrWriteModes
@@ -151,15 +145,8 @@ ZARR_FORMAT_V3_ONLY_ENCODING_KEYS: frozenset[str] = frozenset({"fill_value"})
 # originate from other backends) but that must never be forwarded to zarr on
 # write. These are dropped silently.
 ZARR_READ_ONLY_ENCODING_KEYS: frozenset[str] = frozenset(
-    {"source", "original_shape", "preferred_chunks"}
+    {"source", "original_shape", "preferred_chunks", "zarr_array_metadata"}
 )
-
-# Internal keys that must survive ``_validate_zarr_variable_encoding`` (so
-# ``_create_new_array`` can see them) but are never valid ``zarr.Group.create``
-# keyword arguments, so they must be excluded when the legacy path assembles
-# ``create_kwargs`` from ``encoding``. Currently just the round-tripped spec
-# metadata fragment (see ``xarray.backends.zarr_array_metadata``).
-ZARR_INTERNAL_ENCODING_KEYS: frozenset[str] = frozenset({"zarr_array_metadata"})
 
 
 def valid_zarr_encoding_keys(zarr_format: ZarrFormat) -> frozenset[str]:
@@ -541,11 +528,7 @@ def _validate_zarr_variable_encoding(
     """Filter an encoding mapping down to the keys the Zarr backend accepts.
 
     Read-only/informational keys (``ZARR_READ_ONLY_ENCODING_KEYS``) are always
-    dropped. Internal keys (``ZARR_INTERNAL_ENCODING_KEYS``) always survive,
-    since later steps (e.g. ``_create_new_array``) consume them directly; they
-    are not valid ``zarr.Group.create`` keyword arguments, so callers that
-    forward ``encoding`` to ``create()`` must exclude them separately.
-    Remaining keys are checked against the writable key set for
+    dropped. Remaining keys are checked against the writable key set for
     ``zarr_format``: when ``raise_on_invalid`` is True any unrecognized key
     raises ``ValueError``; otherwise unrecognized keys are dropped silently.
 
@@ -554,10 +537,6 @@ def _validate_zarr_variable_encoding(
     valid_encodings = valid_zarr_encoding_keys(zarr_format)
     encoding = {
         k: v for k, v in encoding.items() if k not in ZARR_READ_ONLY_ENCODING_KEYS
-    }
-    internal = {k: v for k, v in encoding.items() if k in ZARR_INTERNAL_ENCODING_KEYS}
-    encoding = {
-        k: v for k, v in encoding.items() if k not in ZARR_INTERNAL_ENCODING_KEYS
     }
 
     if raise_on_invalid:
@@ -571,9 +550,9 @@ def _validate_zarr_variable_encoding(
             raise ValueError(
                 f"unexpected encoding parameters for zarr backend:  {invalid!r}." + msg
             )
-        return encoding | internal
+        return encoding
 
-    return {k: v for k, v in encoding.items() if k in valid_encodings} | internal
+    return {k: v for k, v in encoding.items() if k in valid_encodings}
 
 
 def extract_zarr_variable_encoding(
@@ -991,8 +970,19 @@ class ZarrStore(AbstractWritableDataStore):
         }
 
         if _zarr_v3():
-            encoding.update(derive_flat_aliases(zarr_array, dimensions))
-            encoding["zarr_array_metadata"] = read_metadata_fragment(zarr_array)
+            encoding.update(
+                {
+                    "compressors": zarr_array.compressors,
+                    "filters": zarr_array.filters,
+                    "shards": zarr_array.shards,
+                }
+            )
+            if self.zarr_group.metadata.zarr_format == 3:
+                encoding.update({"serializer": zarr_array.serializer})
+            # Store the source array's full metadata document for provenance and
+            # introspection. This is read-only: it is dropped on write (see
+            # ``ZARR_READ_ONLY_ENCODING_KEYS``) and is not consumed by the writer.
+            encoding["zarr_array_metadata"] = dict(zarr_array.metadata.to_dict())
         else:
             encoding.update(
                 {
@@ -1241,115 +1231,6 @@ class ZarrStore(AbstractWritableDataStore):
     def _create_new_array(
         self, *, name, dims, shape, dtype, fill_value, encoding, attrs
     ) -> ZarrArray:
-        fragment = encoding.get("zarr_array_metadata")
-        resolved_chunks = encoding.get("chunks")
-        if (
-            _zarr_v3()
-            and isinstance(fragment, dict)
-            and self._write_empty is None
-            and isinstance(resolved_chunks, tuple)
-            and not encoding.get("shards")
-            and "write_empty_chunks" not in encoding
-            and not encoding.get("order")
-        ):
-            # Fast path: the variable already carries a spec-level metadata
-            # fragment (e.g. round-tripped from an existing zarr array), and
-            # we have a concrete chunk grid to write. Building the array via
-            # the canonical-metadata seam lets us convert the fragment
-            # between zarr formats (e.g. v2 -> v3) instead of feeding a v2
-            # compressor spec into zarr-python's v3 `create()`, which cannot
-            # translate it (see module docstring in zarr_array_metadata.py).
-            #
-            # We fall through to the legacy path below when:
-            #  - there's no fragment (fresh in-memory data, or zarr-python 2)
-            #  - `self._write_empty` is set, or the variable's own encoding
-            #    carries `write_empty_chunks`: the legacy path applies it via
-            #    the array's runtime `config`, which `persist_array` (a pure
-            #    metadata-document write) does not handle. Rather than lose
-            #    that setting, we defer to `zarr_group.create()` in that case.
-            #  - the variable's encoding carries `order`: like
-            #    `write_empty_chunks`, this is runtime array config (not part
-            #    of the spec metadata document) that the legacy path applies
-            #    via `create(config={"order": ...})`; `persist_array` has no
-            #    way to honor it, so we defer to `zarr_group.create()`.
-            #  - chunks aren't a concrete tuple yet (e.g. `encoding["chunks"]`
-            #    is the sentinel string "auto"): the fragment path needs an
-            #    explicit chunk grid to write into the metadata document.
-            #  - `shards` is set: sharding uses a `sharding_indexed` codec
-            #    whose *outer* `chunk_grid` is the shard shape and whose
-            #    *inner* write-chunk shape lives in the codec's own
-            #    configuration. `_set_chunk_shape` (in
-            #    `zarr_array_metadata.py`) only knows how to overwrite the
-            #    fragment's top-level `chunk_grid`, so blindly doing that for
-            #    a sharded fragment stamps `resolved_chunks` (the inner write
-            #    chunk shape) over the shard shape and silently corrupts it.
-            #    Sharding-aware fragment conversion is out of scope here (see
-            #    `zarr_array_metadata.py` task history); defer to
-            #    `zarr_group.create()`, which handles `shards` correctly.
-            target_format: Literal[2, 3] = (
-                3 if self.zarr_group.metadata.zarr_format == 3 else 2
-            )
-            # `resolved_chunks` (computed by `_determine_zarr_chunks` from the
-            # variable's current dask chunking) is always the chunk grid we
-            # actually write -- `_set_chunk_shape` inside
-            # `build_canonical_metadata` unconditionally overwrites whatever
-            # chunk shape the fragment carries with `resolved_chunks`. If the
-            # fragment was read from a store where the array had a
-            # *different* chunk shape (e.g. the variable was opened and then
-            # explicitly rechunked before being written back out),
-            # `encoding["chunks"]` and the stale fragment disagree, and
-            # `merge_flat_aliases`'s conflict check would raise even though
-            # that outcome is immediately discarded by `_set_chunk_shape`.
-            # Drop `chunks` from the encoding we merge so that check can only
-            # ever fire on a genuine, unresolvable conflict; `resolved_chunks`
-            # remains the sole source of truth for the chunk grid actually
-            # written.
-            #
-            # `fill_value` (the parameter this method receives, computed by
-            # `set_variables`: float default -> NaN, `_FillValue`-attr driven,
-            # `use_zarr_fill_value_as_mask` handling, etc.) is likewise always
-            # the authoritative value to write -- the fragment's own
-            # `fill_value` field reflects whatever the *source* array had,
-            # which can be stale (e.g. the user dropped the `_FillValue`
-            # attribute after opening). `build_canonical_metadata` overwrites
-            # the fragment's `fill_value` with `fill_value` unconditionally,
-            # the same way it does for `resolved_chunks`, so the fast path
-            # matches what `zarr_group.create(fill_value=fill_value)` would
-            # have written on the legacy path. When `fill_value` is `None`
-            # ("let zarr choose its own dtype-aware default", e.g. 0 for ints,
-            # False for bool), `_set_fill_value` (in `zarr_array_metadata.py`)
-            # resolves the same default zarr-python's `create()` would have
-            # picked, via `dtype.default_scalar()`, rather than falling
-            # through to the legacy path -- falling through here would
-            # discard this fragment's already-converted codecs/compressor and
-            # reintroduce the v2->v3 compressor-translation problem the fast
-            # path exists to avoid.
-            #
-            # `dtype` (the parameter this method receives) is, likewise, the
-            # dtype the write actually encodes to -- e.g. `int16` for a
-            # CF-packed `scale_factor`/`add_offset` variable being written
-            # from an unpacked-float64 fragment. `build_canonical_metadata`
-            # stamps it over the fragment's own (possibly stale) dtype field
-            # before resolving the fill-value default, so the fast path
-            # matches what `zarr_group.create(dtype=dtype)` would have
-            # written on the legacy path instead of silently persisting an
-            # array whose on-disk dtype disagrees with the data being
-            # streamed into it.
-            merge_encoding = {k: v for k, v in encoding.items() if k != "chunks"}
-            canonical = build_canonical_metadata(
-                merge_encoding,
-                shape=shape,
-                dims=dims,
-                target_format=target_format,
-                resolved_chunks=resolved_chunks,
-                resolved_fill_value=fill_value,
-                resolved_dtype=dtype,
-            )
-            store_path = self.zarr_group.store_path / name
-            persist_array(store_path, canonical)
-            zarr_array = self._open_existing_array(name=name)
-            return _put_attrs(zarr_array, attrs)
-
         if coding.strings.check_vlen_dtype(dtype) is str:
             dtype = str
 
@@ -1357,12 +1238,8 @@ class ZarrStore(AbstractWritableDataStore):
         # variable's storage `encoding` plus store-level parameters (overwrite,
         # dimension names, write-empty policy). We build a separate dict rather
         # than mutating `encoding`, keeping xarray's encoding concept distinct
-        # from zarr's `create()` signature. Internal keys (e.g.
-        # `zarr_array_metadata`) are not valid `create()` kwargs and are
-        # excluded here.
-        create_kwargs = {
-            k: v for k, v in encoding.items() if k not in ZARR_INTERNAL_ENCODING_KEYS
-        }
+        # from zarr's `create()` signature.
+        create_kwargs = dict(encoding)
         create_kwargs["overwrite"] = self._mode == "w"
 
         if _zarr_v3() and self.zarr_group.metadata.zarr_format == 3:

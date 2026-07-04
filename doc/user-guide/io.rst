@@ -1110,60 +1110,14 @@ For example:
     Not all native zarr compression and filtering options have been tested with
     xarray.
 
-.. _io.zarr.array_metadata:
+.. note::
 
-Controlling the full zarr array metadata
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-The flat encoding keys shown above (``chunks``, ``compressors``, ``filters``,
-``shards``, ``serializer``, ...) cover the most common cases, but each only
-controls a single piece of a zarr array's on-disk metadata. Whenever a
-variable is opened from a Zarr store, xarray also stashes the array's
-complete spec-level metadata document (as returned by
-``zarr.Array.metadata.to_dict()``) on ``encoding["zarr_array_metadata"]``.
-Writing that variable back out re-applies this fragment, which is what lets
-xarray convert an array's on-disk representation between zarr format v2 and
-v3: opening a v2 store and writing it back out with ``zarr_format=3`` (or
-vice versa) automatically translates the stored metadata, including its
-compressors, to the target format's spec:
-
-.. jupyter-execute::
-    :hide-code:
-
-    tempdir.cleanup()
-    tempdir = tempfile.TemporaryDirectory()
-
-.. jupyter-execute::
-
-    v2_filename = os.path.join(tempdir.name, "v2.zarr")
-    v3_filename = os.path.join(tempdir.name, "v3.zarr")
-
-    ds.to_zarr(v2_filename, consolidated=False, zarr_format=2)
-
-    # opening the store carries its zarr_format-2 metadata fragment along on
-    # the variable's encoding
-    reopened = xr.open_zarr(v2_filename, consolidated=False)
-    reopened["foo"].encoding["zarr_array_metadata"]["zarr_format"]
-
-.. jupyter-execute::
-
-    # writing it back out as zarr_format 3 converts the fragment for you
-    reopened.to_zarr(v3_filename, consolidated=False, zarr_format=3)
-
-``encoding["zarr_array_metadata"]`` can also be set explicitly (e.g. to a
-dict copied from another array's ``metadata.to_dict()``) to control the
-storage layout directly, and is the preferred way to do so: it is the single
-place that describes the complete on-disk array metadata. The flat keys
-remain fully supported as convenient aliases for the pieces of metadata they
-each cover, and both forms may be combined as long as they do not disagree.
-The flat keys are not deprecated.
-
-The v2⇄v3 conversion only handles common arrays (standard numeric dtypes,
-C memory order, and a handful of well-known compressors); for layouts it
-cannot faithfully convert (e.g. non-C memory order, non-little-endian data,
-or string/vlen data) it raises a clear ``NotImplementedError`` naming the
-unsupported field rather than silently corrupting it -- write those arrays
-via the flat encoding keys instead.
+    When a variable is read from a Zarr store, xarray also stores the array's
+    complete Zarr metadata document (as returned by
+    ``zarr.Array.metadata.to_dict()``) on ``encoding["zarr_array_metadata"]``.
+    This is provided for provenance and introspection only: it is read-only, so
+    it is dropped when writing and is not used to control how the array is
+    written. It is populated when using zarr-python 3.
 
 .. _io.zarr.appending:
 
