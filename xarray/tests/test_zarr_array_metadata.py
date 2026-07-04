@@ -338,6 +338,45 @@ def test_convert_metadata_v3_to_v2_raises_for_vlen_utf8_serializer():
 
 
 @requires_zarr
+def test_convert_metadata_v3_to_v2_raises_for_multiple_compressors():
+    """A v3 fragment carrying more than one bytes-bytes compressor codec
+    (reachable via ``_fold_flat_codecs`` making a user-set
+    ``encoding["compressors"] = [codec_a, codec_b]`` authoritative) must
+    raise ``NotImplementedError`` naming the count, mirroring the equivalent
+    guard in ``_fold_flat_codecs``'s v2 branch. Zarr v2 supports at most one
+    compressor; silently keeping only the last codec would corrupt data by
+    dropping the earlier compressor with no error.
+    """
+    from xarray.backends.zarr_array_metadata import convert_zarr_metadata
+
+    v3 = {
+        "zarr_format": 3,
+        "node_type": "array",
+        "shape": (4,),
+        "data_type": "float64",
+        "chunk_grid": {
+            "name": "regular",
+            "configuration": {"chunk_shape": (2,)},
+        },
+        "chunk_key_encoding": {
+            "name": "default",
+            "configuration": {"separator": "/"},
+        },
+        "codecs": (
+            {"name": "bytes", "configuration": {"endian": "little"}},
+            {"name": "gzip", "configuration": {"level": 4}},
+            {"name": "zstd", "configuration": {"level": 0, "checksum": False}},
+        ),
+        "fill_value": 0.0,
+        "attributes": {},
+        "storage_transformers": (),
+    }
+
+    with pytest.raises(NotImplementedError, match="at most one compressor"):
+        convert_zarr_metadata(v3, 2)
+
+
+@requires_zarr
 def test_persist_array_roundtrips(tmp_path):
     import zarr
     from zarr.storage import LocalStore, StorePath

@@ -4917,6 +4917,49 @@ def test_v3_to_v2_roundtrip_fast_path(tmp_path) -> None:
 
 
 @requires_zarr
+def test_v3_to_v2_roundtrip_fast_path_honors_write_dtype(tmp_path) -> None:
+    """Mirror of ``test_v2_to_v3_roundtrip_fast_path_honors_write_dtype`` for
+    the opposite direction: a v2-*target* write via the fast path must also
+    stamp the dtype actually being written (e.g. the packed ``int16`` of a
+    CF ``scale_factor``/``add_offset`` encoding) over the fragment's own,
+    stale dtype (``float64`` from the unpacked source array). This exercises
+    ``_set_dtype``'s v2 branch, which extracts ``["name"]`` from the parsed
+    dtype's JSON form rather than using the v3 bare-string form directly.
+    """
+    from xarray.backends.zarr import _zarr_v3
+
+    if not _zarr_v3():
+        pytest.skip("requires zarr-python 3")
+
+    import zarr
+
+    p_src = tmp_path / "src.zarr"
+    p_dst = tmp_path / "dst.zarr"
+
+    values = np.array([1.1, 2.2, 3.3, 4.4, 5.5], dtype="float64")
+    ds = xr.Dataset({"a": ("x", values)}).chunk({"x": 5})
+    ds.to_zarr(p_src, zarr_format=3, mode="w")
+
+    opened = xr.open_zarr(p_src, mask_and_scale=False)
+    assert opened["a"].dtype == np.dtype("float64")
+    opened["a"].encoding.pop("fill_value", None)
+    # A plain `_FillValue` attribute (not an `encoding` key) just silences the
+    # "no _FillValue to use for NaNs" packing warning here; it plays no part
+    # in the dtype-stamping bug under test.
+    opened["a"].attrs["_FillValue"] = -1
+    opened["a"].encoding.update(
+        {"scale_factor": 0.1, "add_offset": 0.0, "dtype": "int16"}
+    )
+    opened.to_zarr(p_dst, zarr_format=2, mode="w")
+
+    za = zarr.open(p_dst)["a"]
+    assert za.dtype == np.dtype("int16")
+
+    back = xr.open_zarr(p_dst)
+    np.testing.assert_allclose(back["a"].values, values, atol=0.05)
+
+
+@requires_zarr
 def test_fast_path_honors_in_place_compressor_change(tmp_path) -> None:
     """Regression test for the fast-path ``zarr_array_metadata`` seam
     silently dropping an in-place codec change: opening a store, mutating

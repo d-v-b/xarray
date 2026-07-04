@@ -524,7 +524,7 @@ def _convert_v3_to_v2(fragment: Mapping[str, object]) -> dict[str, object]:
     codecs = fragment.get("codecs")
     codecs = list(codecs) if isinstance(codecs, (list, tuple)) else []
 
-    compressor: dict[str, object] | None = None
+    compressors: list[dict[str, object]] = []
     endian: Literal["little", "big"] = "little"
     for codec in codecs:
         if not isinstance(codec, Mapping):
@@ -549,7 +549,15 @@ def _convert_v3_to_v2(fragment: Mapping[str, object]) -> dict[str, object]:
                 "metadata-fragment converter (write via the flat encoding "
                 "path instead)"
             )
-        compressor = _v3_codec_to_v2_compressor(codec)
+        compressors.append(_v3_codec_to_v2_compressor(codec))
+
+    if len(compressors) > 1:
+        raise NotImplementedError(
+            "zarr v2 arrays support at most one compressor, got "
+            f"{len(compressors)} bytes-bytes compressor codecs in the v3 "
+            "metadata fragment"
+        )
+    compressor = compressors[0] if compressors else None
 
     chunk_grid = fragment.get("chunk_grid")
     chunk_shape: object = None
