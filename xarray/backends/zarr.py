@@ -384,6 +384,62 @@ class ZarrArrayWrapper(BackendArray):
         )
 
 
+def _fragment_chunk_shape(fragment: Mapping[str, object]) -> tuple[int, ...] | None:
+    """Chunk shape recorded in a stored ``zarr_array_metadata`` document.
+
+    Reads ``chunk_grid.configuration.chunk_shape`` (Zarr v3) or ``chunks``
+    (Zarr v2). Returns None if the shape can't be determined.
+    """
+    if fragment.get("zarr_format") == 3:
+        grid = fragment.get("chunk_grid")
+        if isinstance(grid, Mapping):
+            config = grid.get("configuration")
+            if isinstance(config, Mapping):
+                shape = config.get("chunk_shape")
+                if isinstance(shape, tuple | list):
+                    return tuple(shape)
+        return None
+    chunks = fragment.get("chunks")
+    return tuple(chunks) if isinstance(chunks, tuple | list) else None
+
+
+def _warn_on_encoding_chunks_drift(variable) -> None:
+    """Warn if ``encoding['chunks']`` looks like a stale hand-edit.
+
+    ``encoding['zarr_array_metadata']`` records the source array's metadata as
+    read (see ``open_store_variable``). If the variable still carries that
+    document but its ``encoding['chunks']`` matches neither the document's chunk
+    shape nor the variable's own (dask) chunking, the value was almost certainly
+    edited by hand and is now stale — which is deprecated. Cases that do NOT
+    warn: a plain round-trip or ``.chunk(...)`` (both leave ``encoding['chunks']``
+    equal to the document), and ``overwrite_encoded_chunks=True`` (which sets
+    ``encoding['chunks']`` to the variable's current chunking — consistent with
+    the data being written).
+    """
+    encoding = variable.encoding
+    fragment = encoding.get("zarr_array_metadata")
+    enc_chunks = encoding.get("chunks")
+    if not isinstance(fragment, Mapping) or not isinstance(enc_chunks, tuple | list):
+        return
+    enc_chunks = tuple(enc_chunks)
+    baseline = _fragment_chunk_shape(fragment)
+    if baseline is None or enc_chunks == baseline:
+        return
+    # Consistent with the variable's own chunking (e.g. rechunk +
+    # overwrite_encoded_chunks) -> not a stale hand-edit.
+    var_chunks = variable.chunks
+    if var_chunks is not None and tuple(c[0] for c in var_chunks) == enc_chunks:
+        return
+    emit_user_level_warning(
+        "encoding['chunks'] no longer matches the source array's chunks or the "
+        "variable's current chunking, which usually means it was set by hand and "
+        "is stale. Editing encoding['chunks'] to control Zarr chunking is "
+        "deprecated and will stop being honored in a future version. Rechunk "
+        "with `.chunk(...)`, or pass chunks via `to_zarr(encoding=...)` instead.",
+        DeprecationWarning,
+    )
+
+
 def _determine_zarr_chunks(enc_chunks, var_chunks, ndim, name):
     """
     Given encoding chunks (possibly None or []) and variable chunks
@@ -1405,6 +1461,7 @@ class ZarrStore(AbstractWritableDataStore):
 
             if self._mode == "w" or name not in existing_keys:
                 # new variable
+                _warn_on_encoding_chunks_drift(v)
                 encoded_attrs = {k: self.encode_attribute(v) for k, v in attrs.items()}
                 # the magic for storing the hidden dimension data. For zarr v3
                 # the dimension names are passed to `create()` as a storage-level

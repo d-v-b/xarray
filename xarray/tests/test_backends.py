@@ -4570,6 +4570,40 @@ def test_zarr_array_metadata_stored_on_read(tmp_path) -> None:
     assert_identical(xr.open_zarr(tmp_path / "s2.zarr"), ds)
 
 
+@requires_zarr_v3
+def test_encoding_chunks_drift_warns(tmp_path) -> None:
+    # hand-editing encoding["chunks"] away from the source array's chunk shape
+    # (detected via the stored zarr_array_metadata document) is deprecated.
+    ds = xr.Dataset({"a": ("x", np.arange(8.0))}).chunk({"x": 4})
+    ds.to_zarr(tmp_path / "s.zarr", zarr_format=3, mode="w")
+
+    opened = xr.open_zarr(tmp_path / "s.zarr").compute()  # numpy; keeps encoding
+    assert tuple(opened["a"].encoding["chunks"]) == (4,)
+    opened["a"].encoding["chunks"] = (2,)  # hand-edit the key
+
+    with pytest.warns(DeprecationWarning, match=r"encoding\['chunks'\]"):
+        opened.to_zarr(tmp_path / "s2.zarr", zarr_format=3, mode="w")
+
+
+@requires_zarr_v3
+def test_encoding_chunks_no_drift_no_warn(tmp_path) -> None:
+    # `.chunk(...)` changes the dask chunking but not encoding["chunks"], so a
+    # rechunk-then-write must NOT raise the chunks-drift deprecation warning.
+    ds = xr.Dataset({"a": ("x", np.arange(8.0))}).chunk({"x": 4})
+    ds.to_zarr(tmp_path / "s.zarr", zarr_format=3, mode="w")
+
+    rechunked = xr.open_zarr(tmp_path / "s.zarr").chunk({"x": 3})
+
+    with warnings.catch_warnings(record=True) as records:
+        warnings.simplefilter("always")
+        rechunked.to_zarr(
+            tmp_path / "s2.zarr", zarr_format=3, mode="w", safe_chunks=False
+        )
+    assert not any("encoding['chunks']" in str(r.message) for r in records), [
+        str(r.message) for r in records
+    ]
+
+
 @requires_zarr
 def test_zarr_version_deprecated() -> None:
     ds = create_test_data()
