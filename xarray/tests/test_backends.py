@@ -7204,27 +7204,41 @@ def test_extract_zarr_variable_encoding() -> None:
 
 
 @requires_zarr
-def test_validate_zarr_variable_encoding() -> None:
+@pytest.mark.parametrize(
+    "read_only_key", ["preferred_chunks", "source", "original_shape"]
+)
+def test_validate_zarr_encoding_drops_read_only_key(read_only_key) -> None:
     validate = backends.zarr._validate_zarr_variable_encoding
-
-    # read-only keys are always dropped, input is not mutated
-    src = {"chunks": (1,), "preferred_chunks": {"x": 1}, "source": "foo.zarr"}
+    src = {"chunks": (1,), read_only_key: "value"}
     out = validate(src, raise_on_invalid=False, zarr_format=3)
     assert out == {"chunks": (1,)}
-    assert "preferred_chunks" in src  # input untouched
+    assert read_only_key in src  # input is not mutated
 
-    # unknown keys dropped silently when not raising
+
+@requires_zarr
+def test_validate_zarr_encoding_drops_unknown_key_when_not_raising() -> None:
+    validate = backends.zarr._validate_zarr_variable_encoding
     out = validate({"foo": 1, "chunks": (1,)}, raise_on_invalid=False, zarr_format=3)
     assert out == {"chunks": (1,)}
 
-    # unknown keys raise when requested
+
+@requires_zarr
+def test_validate_zarr_encoding_raises_on_unknown_key() -> None:
+    validate = backends.zarr._validate_zarr_variable_encoding
     with pytest.raises(ValueError, match=r"unexpected encoding parameters"):
         validate({"foo": 1}, raise_on_invalid=True, zarr_format=3)
 
-    # fill_value is only valid for v3; v2 raises with a helpful hint
-    assert validate({"fill_value": 0}, raise_on_invalid=True, zarr_format=3) == {
-        "fill_value": 0
-    }
+
+@requires_zarr
+def test_validate_zarr_encoding_accepts_fill_value_for_v3() -> None:
+    validate = backends.zarr._validate_zarr_variable_encoding
+    out = validate({"fill_value": 0}, raise_on_invalid=True, zarr_format=3)
+    assert out == {"fill_value": 0}
+
+
+@requires_zarr
+def test_validate_zarr_encoding_rejects_fill_value_for_v2() -> None:
+    validate = backends.zarr._validate_zarr_variable_encoding
     with pytest.raises(ValueError, match=r"Use `_FillValue`"):
         validate({"fill_value": 0}, raise_on_invalid=True, zarr_format=2)
 

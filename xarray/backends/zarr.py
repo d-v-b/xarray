@@ -116,10 +116,8 @@ ZarrFormat = Literal[2, 3]
 
 # --- Zarr encoding keys -----------------------------------------------------
 # The variable ``.encoding`` dict is xarray's channel for storage-level metadata.
-# For the Zarr backend the recognized keys fall into three groups. Keeping them
-# here as the single source of truth (rather than inline in
-# ``extract_zarr_variable_encoding``) makes it possible to document, validate,
-# and eventually translate between Zarr formats consistently.
+# For the Zarr backend the recognized keys fall into three groups, defined here
+# as the single source of truth for documenting and validating them.
 
 # Encoding keys understood by the Zarr backend and forwarded as keyword
 # arguments to zarr's array-creation routine. Valid for both Zarr formats.
@@ -1230,11 +1228,11 @@ class ZarrStore(AbstractWritableDataStore):
         if coding.strings.check_vlen_dtype(dtype) is str:
             dtype = str
 
-        # Assemble the keyword arguments for zarr array creation. These are the
-        # variable's storage `encoding` plus store-level parameters (overwrite,
-        # dimension names, write-empty policy). We build a separate dict rather
-        # than mutating `encoding`, keeping xarray's encoding concept distinct
-        # from zarr's `create()` signature.
+        # Zarr array creation takes the variable's storage `encoding` together
+        # with store-level parameters (overwrite, dimension names, write-empty
+        # policy). Collect them in their own dict so that `encoding` remains a
+        # plain description of the variable's storage, separate from the
+        # arguments accepted by zarr's `create()`.
         create_kwargs = dict(encoding)
         create_kwargs["overwrite"] = self._mode == "w"
 
