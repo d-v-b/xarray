@@ -1400,9 +1400,9 @@ class ZarrStore(AbstractWritableDataStore):
             if self._mode == "w" or name not in existing_keys:
                 # new variable
                 encoded_attrs = {k: self.encode_attribute(v) for k, v in attrs.items()}
-                # the magic for storing the hidden dimension data. For zarr v3
-                # the dimension names are passed to `create()` as a storage-level
-                # parameter (see `_create_new_array`); for v2 they live in attrs.
+                # Zarr has no native concept of dimension names, so xarray
+                # records them: as a storage-level parameter for zarr v3, and as
+                # a hidden attribute for zarr v2.
                 if not is_zarr_v3_format:
                     encoded_attrs[DIMENSION_KEY] = dims
 

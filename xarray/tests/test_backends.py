@@ -7181,24 +7181,28 @@ def test_fill_value_coder_inf_nan(value, dtype) -> None:
 
 
 @requires_zarr
-def test_extract_zarr_variable_encoding() -> None:
-    var = xr.Variable("x", [1, 2])
+@pytest.mark.parametrize(
+    "encoding, expected_chunks",
+    [({}, "auto"), ({"chunks": (1,)}, (1,))],
+)
+def test_extract_zarr_encoding_resolves_chunks(encoding, expected_chunks) -> None:
+    var = xr.Variable("x", [1, 2], encoding=encoding)
     actual = backends.zarr.extract_zarr_variable_encoding(var, zarr_format=3)
-    assert "chunks" in actual
-    assert actual["chunks"] == "auto"
+    assert actual["chunks"] == expected_chunks
 
-    var = xr.Variable("x", [1, 2], encoding={"chunks": (1,)})
-    actual = backends.zarr.extract_zarr_variable_encoding(var, zarr_format=3)
-    assert actual["chunks"] == (1,)
 
-    # does not raise on invalid
+@requires_zarr
+def test_extract_zarr_encoding_drops_invalid_key() -> None:
     var = xr.Variable("x", [1, 2], encoding={"foo": (1,)})
     actual = backends.zarr.extract_zarr_variable_encoding(var, zarr_format=3)
+    assert "foo" not in actual
 
-    # raises on invalid
+
+@requires_zarr
+def test_extract_zarr_encoding_raises_on_invalid_key() -> None:
     var = xr.Variable("x", [1, 2], encoding={"foo": (1,)})
     with pytest.raises(ValueError, match=r"unexpected encoding parameters"):
-        actual = backends.zarr.extract_zarr_variable_encoding(
+        backends.zarr.extract_zarr_variable_encoding(
             var, raise_on_invalid=True, zarr_format=3
         )
 
