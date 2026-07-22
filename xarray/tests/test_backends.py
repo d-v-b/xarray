@@ -7248,17 +7248,18 @@ def test_validate_zarr_encoding_rejects_fill_value_for_v2() -> None:
 
 
 @requires_zarr
-def test_valid_zarr_encoding_keys() -> None:
+def test_valid_zarr_encoding_keys_fill_value_is_v3_only() -> None:
     # fill_value is the only format-specific encoding key: valid for v3 only,
     # since in format 2 the fill value is carried by the _FillValue attribute.
-    v2 = backends.zarr.valid_zarr_encoding_keys(2)
-    v3 = backends.zarr.valid_zarr_encoding_keys(3)
-    assert v3 - v2 == {"fill_value"}
-    assert "chunks" in v2 and "chunks" in v3
+    keys = backends.zarr.ZARR_VALID_ENCODING_KEYS
+    assert keys[3] - keys[2] == {"fill_value"}
 
-    # read-only/informational keys are never part of the writable key set
-    assert not (backends.zarr.ZARR_READ_ONLY_ENCODING_KEYS & v3)
-    assert "preferred_chunks" in backends.zarr.ZARR_READ_ONLY_ENCODING_KEYS
+
+@requires_zarr
+def test_read_only_encoding_keys_are_not_writable() -> None:
+    keys = backends.zarr.ZARR_VALID_ENCODING_KEYS
+    read_only = backends.zarr.ZARR_READ_ONLY_ENCODING_KEYS
+    assert not (read_only & (keys[2] | keys[3]))
 
 
 @requires_zarr

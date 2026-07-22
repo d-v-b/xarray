@@ -135,9 +135,13 @@ ZARR_ENCODING_KEYS: frozenset[str] = frozenset(
     }
 )
 
-# Encoding keys that are only valid for Zarr format 3. In format 2 the array
-# fill value is carried by the ``_FillValue`` attribute instead.
-ZARR_FORMAT_V3_ONLY_ENCODING_KEYS: frozenset[str] = frozenset({"fill_value"})
+# The complete set of ``.encoding`` keys the Zarr backend accepts on write, per
+# Zarr format. ``fill_value`` is valid encoding only for format 3; in format 2
+# the array fill value is carried by the ``_FillValue`` attribute instead.
+ZARR_VALID_ENCODING_KEYS: Mapping[ZarrFormat, frozenset[str]] = {
+    2: ZARR_ENCODING_KEYS,
+    3: ZARR_ENCODING_KEYS | {"fill_value"},
+}
 
 # Informational keys that xarray populates in ``.encoding`` on read (or that
 # originate from other backends) but that must never be forwarded to zarr on
@@ -145,23 +149,6 @@ ZARR_FORMAT_V3_ONLY_ENCODING_KEYS: frozenset[str] = frozenset({"fill_value"})
 ZARR_READ_ONLY_ENCODING_KEYS: frozenset[str] = frozenset(
     {"source", "original_shape", "preferred_chunks"}
 )
-
-
-def valid_zarr_encoding_keys(zarr_format: ZarrFormat) -> frozenset[str]:
-    """Return the set of ``.encoding`` keys the Zarr backend accepts on write.
-
-    Parameters
-    ----------
-    zarr_format : {2, 3}
-        The Zarr format being written to.
-
-    Returns
-    -------
-    frozenset of str
-    """
-    if zarr_format == 3:
-        return ZARR_ENCODING_KEYS | ZARR_FORMAT_V3_ONLY_ENCODING_KEYS
-    return ZARR_ENCODING_KEYS
 
 
 class FillValueCoder:
@@ -532,7 +519,7 @@ def _validate_zarr_variable_encoding(
 
     Returns a new dict; the input mapping is never mutated.
     """
-    valid_encodings = valid_zarr_encoding_keys(zarr_format)
+    valid_encodings = ZARR_VALID_ENCODING_KEYS[zarr_format]
     encoding = {
         k: v for k, v in encoding.items() if k not in ZARR_READ_ONLY_ENCODING_KEYS
     }
