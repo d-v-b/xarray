@@ -1229,7 +1229,8 @@ class ZarrStore(AbstractWritableDataStore):
             ):
                 raise ValueError(
                     'Differing "write_empty_chunks" values in encoding and parameters. '
-                    f'Got {create_kwargs["write_empty_chunks"] = } and {self._write_empty = }'
+                    f"Got write_empty_chunks={create_kwargs['write_empty_chunks']!r} in "
+                    f"encoding and write_empty_chunks={self._write_empty!r} as a parameter."
                 )
             else:
                 create_kwargs["write_empty_chunks"] = self._write_empty
