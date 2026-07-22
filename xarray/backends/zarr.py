@@ -518,7 +518,7 @@ def _validate_zarr_variable_encoding(
     }
 
     invalid = [k for k in encoding if k not in valid_keys]
-    if invalid and raise_on_invalid:
+    if len(invalid) > 0 and raise_on_invalid:
         msg = (
             " Use `_FillValue` to set the Zarr array `fill_value`"
             if "fill_value" in invalid and zarr_format == 2

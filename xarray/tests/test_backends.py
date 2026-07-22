@@ -7258,7 +7258,7 @@ def test_valid_zarr_encoding_keys_fill_value_is_v3_only() -> None:
 @requires_zarr
 def test_read_only_encoding_keys_are_not_writable() -> None:
     read_only = backends.zarr.ZARR_READ_ONLY_ENCODING_KEYS
-    assert not (read_only & backends.zarr.ZARR_V3_ENCODING_KEYS)
+    assert read_only.isdisjoint(backends.zarr.ZARR_V3_ENCODING_KEYS)
 
 
 @requires_zarr
