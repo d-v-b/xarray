@@ -115,13 +115,10 @@ DIMENSION_KEY = "_ARRAY_DIMENSIONS"
 ZarrFormat = Literal[2, 3]
 
 # --- Zarr encoding keys -----------------------------------------------------
-# The variable ``.encoding`` dict is xarray's channel for storage-level metadata.
-# For the Zarr backend the recognized keys fall into three groups, defined here
-# as the single source of truth for documenting and validating them.
-
-# Encoding keys understood by the Zarr backend and forwarded as keyword
-# arguments to zarr's array-creation routine. Valid for both Zarr formats.
-ZARR_ENCODING_KEYS: frozenset[str] = frozenset(
+# The variable ``.encoding`` dict is xarray's channel for storage-level
+# metadata. The sets below are the single source of truth for the keys the
+# Zarr backend accepts on write and forwards to zarr's array-creation routine.
+ZARR_V2_ENCODING_KEYS: frozenset[str] = frozenset(
     {
         "chunks",
         "shards",
@@ -135,13 +132,9 @@ ZARR_ENCODING_KEYS: frozenset[str] = frozenset(
     }
 )
 
-# The complete set of ``.encoding`` keys the Zarr backend accepts on write, per
-# Zarr format. ``fill_value`` is valid encoding only for format 3; in format 2
-# the array fill value is carried by the ``_FillValue`` attribute instead.
-ZARR_VALID_ENCODING_KEYS: Mapping[ZarrFormat, frozenset[str]] = {
-    2: ZARR_ENCODING_KEYS,
-    3: ZARR_ENCODING_KEYS | {"fill_value"},
-}
+# Format 3 additionally accepts ``fill_value``; in format 2 the array fill
+# value is carried by the ``_FillValue`` attribute instead.
+ZARR_V3_ENCODING_KEYS: frozenset[str] = ZARR_V2_ENCODING_KEYS | {"fill_value"}
 
 # Informational keys that xarray populates in ``.encoding`` on read (or that
 # originate from other backends) but that must never be forwarded to zarr on
@@ -519,25 +512,22 @@ def _validate_zarr_variable_encoding(
 
     Returns a new dict; the input mapping is never mutated.
     """
-    valid_encodings = ZARR_VALID_ENCODING_KEYS[zarr_format]
+    valid_keys = ZARR_V3_ENCODING_KEYS if zarr_format == 3 else ZARR_V2_ENCODING_KEYS
     encoding = {
         k: v for k, v in encoding.items() if k not in ZARR_READ_ONLY_ENCODING_KEYS
     }
 
-    if raise_on_invalid:
-        invalid = [k for k in encoding if k not in valid_encodings]
-        if invalid:
-            msg = (
-                " Use `_FillValue` to set the Zarr array `fill_value`"
-                if "fill_value" in invalid and zarr_format == 2
-                else ""
-            )
-            raise ValueError(
-                f"unexpected encoding parameters for zarr backend:  {invalid!r}." + msg
-            )
-        return encoding
-
-    return {k: v for k, v in encoding.items() if k in valid_encodings}
+    invalid = [k for k in encoding if k not in valid_keys]
+    if invalid and raise_on_invalid:
+        msg = (
+            " Use `_FillValue` to set the Zarr array `fill_value`"
+            if "fill_value" in invalid and zarr_format == 2
+            else ""
+        )
+        raise ValueError(
+            f"unexpected encoding parameters for zarr backend:  {invalid!r}." + msg
+        )
+    return {k: v for k, v in encoding.items() if k not in invalid}
 
 
 def extract_zarr_variable_encoding(
@@ -1223,8 +1213,14 @@ class ZarrStore(AbstractWritableDataStore):
         create_kwargs = dict(encoding)
         create_kwargs["overwrite"] = self._mode == "w"
 
+        # Zarr has no native concept of dimension names, so xarray records
+        # them: as a storage-level parameter for zarr format 3, and as a
+        # hidden attribute for format 2.
         if _zarr_v3() and self.zarr_group.metadata.zarr_format == 3:
             create_kwargs["dimension_names"] = dims
+        else:
+            attrs = dict(attrs)
+            attrs[DIMENSION_KEY] = dims
 
         if self._write_empty is not None:
             if (
@@ -1232,7 +1228,7 @@ class ZarrStore(AbstractWritableDataStore):
                 and create_kwargs["write_empty_chunks"] != self._write_empty
             ):
                 raise ValueError(
-                    'Differing "write_empty_chunks" values in encoding and parameters'
+                    'Differing "write_empty_chunks" values in encoding and parameters. '
                     f'Got {create_kwargs["write_empty_chunks"] = } and {self._write_empty = }'
                 )
             else:
@@ -1387,12 +1383,6 @@ class ZarrStore(AbstractWritableDataStore):
             if self._mode == "w" or name not in existing_keys:
                 # new variable
                 encoded_attrs = {k: self.encode_attribute(v) for k, v in attrs.items()}
-                # Zarr has no native concept of dimension names, so xarray
-                # records them: as a storage-level parameter for zarr v3, and as
-                # a hidden attribute for zarr v2.
-                if not is_zarr_v3_format:
-                    encoded_attrs[DIMENSION_KEY] = dims
-
                 zarr_array = self._create_new_array(
                     name=name,
                     dims=dims,
