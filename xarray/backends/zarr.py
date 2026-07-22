@@ -1213,9 +1213,9 @@ class ZarrStore(AbstractWritableDataStore):
         create_kwargs = dict(encoding)
         create_kwargs["overwrite"] = self._mode == "w"
 
-        # Zarr has no native concept of dimension names, so xarray records
-        # them: as a storage-level parameter for zarr format 3, and as a
-        # hidden attribute for format 2.
+        # Zarr format 3 stores dimension names natively in the array metadata.
+        # Format 2 has no such field, so xarray records them in the hidden
+        # _ARRAY_DIMENSIONS attribute instead.
         if _zarr_v3() and self.zarr_group.metadata.zarr_format == 3:
             create_kwargs["dimension_names"] = dims
         else:
