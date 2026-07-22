@@ -4551,6 +4551,25 @@ def test_zarr_storage_options() -> None:
     assert_identical(ds, ds_a)
 
 
+@requires_zarr_v3
+def test_zarr_array_metadata_stored_on_read(tmp_path) -> None:
+    # The source array's full metadata document is stored on read for
+    # provenance / introspection. It is a read-only encoding key: dropped on
+    # write and never forwarded to the zarr array-creation call.
+    ds = xr.Dataset({"a": ("x", [1.0, 2.0, 3.0, 4.0])}).chunk({"x": 2})
+    ds.to_zarr(tmp_path / "s.zarr", zarr_format=3, mode="w")
+
+    opened = xr.open_zarr(tmp_path / "s.zarr")
+    frag = opened["a"].encoding["zarr_array_metadata"]
+    assert frag["zarr_format"] == 3
+    assert "codecs" in frag
+
+    # rewriting the opened dataset must succeed (the read-only key is dropped,
+    # not passed to zarr's create) and reproduce the original data
+    opened.to_zarr(tmp_path / "s2.zarr", zarr_format=3, mode="w")
+    assert_identical(xr.open_zarr(tmp_path / "s2.zarr"), ds)
+
+
 @requires_zarr
 def test_zarr_version_deprecated() -> None:
     ds = create_test_data()

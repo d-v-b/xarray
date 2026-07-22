@@ -147,7 +147,7 @@ ZARR_VALID_ENCODING_KEYS: Mapping[ZarrFormat, frozenset[str]] = {
 # originate from other backends) but that must never be forwarded to zarr on
 # write. These are dropped silently.
 ZARR_READ_ONLY_ENCODING_KEYS: frozenset[str] = frozenset(
-    {"source", "original_shape", "preferred_chunks"}
+    {"source", "original_shape", "preferred_chunks", "zarr_array_metadata"}
 )
 
 
@@ -964,6 +964,10 @@ class ZarrStore(AbstractWritableDataStore):
             )
             if self.zarr_group.metadata.zarr_format == 3:
                 encoding.update({"serializer": zarr_array.serializer})
+            # Store the source array's full metadata document for provenance and
+            # introspection. This is read-only: it is dropped on write (see
+            # ``ZARR_READ_ONLY_ENCODING_KEYS``) and is not consumed by the writer.
+            encoding["zarr_array_metadata"] = dict(zarr_array.metadata.to_dict())
         else:
             encoding.update(
                 {
