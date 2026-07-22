@@ -1236,12 +1236,13 @@ class ZarrStore(AbstractWritableDataStore):
                 create_kwargs["write_empty_chunks"] = self._write_empty
 
         if _zarr_v3():
-            # zarr v3 deprecated origin and write_empty_chunks
-            # instead preferring to pass them via the config argument
+            # zarr-python 3 expects write_empty_chunks in the config argument
+            # rather than as a top-level parameter
             create_kwargs["config"] = {}
-            for c in ("write_empty_chunks", "order"):
-                if c in create_kwargs:
-                    create_kwargs["config"][c] = create_kwargs.pop(c)
+            if "write_empty_chunks" in create_kwargs:
+                create_kwargs["config"]["write_empty_chunks"] = create_kwargs.pop(
+                    "write_empty_chunks"
+                )
 
         zarr_array = self.zarr_group.create(
             name,
